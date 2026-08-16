@@ -20,20 +20,12 @@
     },
     {
       "parameters": {
-        "fields": {
-          "values": [
-            {
-              "name": "N8N_WEBHOOK_SECRET",
-              "stringValue": "PASTE_N8N_WEBHOOK_SECRET_HERE"
-            }
-          ]
-        },
-        "options": {}
+        "jsCode": "\n// Single place to paste the two secrets. Code-node pass-through is reliable in\n// n8n 2.x (unlike Set nodes, which dropped the payload in this setup).\nconst inp = $json || {};\nreturn [{ json: { ...inp, N8N_WEBHOOK_SECRET: 'PASTE_N8N_WEBHOOK_SECRET_HERE', GEMINI_API_KEY: 'PASTE_GEMINI_API_KEY_HERE' } }];\n"
       },
-      "id": "whsec",
-      "name": "Webhook Secret",
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 3.4,
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         220,
         0
@@ -41,28 +33,7 @@
     },
     {
       "parameters": {
-        "fields": {
-          "values": [
-            {
-              "name": "GEMINI_API_KEY",
-              "stringValue": "PASTE_GEMINI_API_KEY_HERE"
-            }
-          ]
-        },
-        "options": {}
-      },
-      "id": "gmkey",
-      "name": "Gemini Key",
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 3.4,
-      "position": [
-        440,
-        0
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "\nconst crypto = require('crypto');\n// HMAC-SHA256 verification (build plan §8.5). The secret arrives via the\n// \"Webhook Secret\" Set node chained upstream (field N8N_WEBHOOK_SECRET).\n// JSON.stringify preserves the key order of the received body, so it matches\n// the string Next.js signed.\nconst inp = $input.first().json || {};\nconst secret = String(inp.N8N_WEBHOOK_SECRET || inp.webhookSecret || '');\nconst headers = inp.headers || {};\nconst sig = String(headers['x-signature'] || headers['X-Signature'] || '');\nconst body = inp.body || {};\nconst computed = crypto.createHmac('sha256', secret).update(JSON.stringify(body)).digest('hex');\nconst valid = sig.length > 0 && secret.length > 0 && sig === computed;\nreturn [{ json: { ...inp, valid: valid } }];\n"
+        "jsCode": "\nconst crypto = require('crypto');\n// HMAC-SHA256 verification (build plan §8.5). The secret arrives via the\n// \"Webhook Secret\" Set node chained upstream (field N8N_WEBHOOK_SECRET).\n// JSON.stringify preserves the key order of the received body, so it matches\n// the string Next.js signed.\nconst inp = $input.first().json || {};\nconst secret = String(inp.N8N_WEBHOOK_SECRET || inp.webhookSecret || '');\nconst headers = inp.headers || {};\nconst sig = String(headers['x-signature'] || headers['X-Signature'] || '');\nconst body = inp.body;\n// n8n 2.x may deliver the body already parsed (object) or as the raw string.\n// JSON.stringify on the parsed object reproduces the exact bytes Next.js signed.\nconst bodyStr = typeof body === 'string' ? body : JSON.stringify(body || {});\nconst computed = crypto.createHmac('sha256', secret).update(bodyStr).digest('hex');\nconst valid = sig.length > 0 && secret.length > 0 && sig === computed;\nreturn [{ json: { ...inp, valid: valid } }];\n"
       },
       "id": "verify",
       "name": "Verify Signature",
@@ -106,7 +77,7 @@
     },
     {
       "parameters": {
-        "jsCode": "\nconst inp = $input.first().json || {};\nconst apiKey = String(inp.GEMINI_API_KEY || inp.apiKey || '');\nconst payload = inp.payload || {};\nconst transcript = Array.isArray(payload.transcript) ? payload.transcript : [];\nconst lines = transcript.map(function (t) { return t.speaker + ': ' + t.text; }).join('\\n');\n\n// ── Structured output schema (mirrors n8n/LLM_PROMPT_AND_SCHEMA.md) ──\nconst schema = {\n  type: 'object',\n  required: ['overall_sentiment', 'summary', 'intent', 'resolution', 'risk', 'customer', 'agent', 'emotions', 'important_moments', 'sentences'],\n  properties: {\n    overall_sentiment: {\n      type: 'object',\n      required: ['label', 'score', 'confidence'],\n      properties: {\n        label: { type: 'string', enum: ['positive', 'neutral', 'negative'] },\n        score: { type: 'integer', minimum: 0, maximum: 100 },\n        confidence: { type: 'number', minimum: 0, maximum: 1 }\n      }\n    },\n    summary: { type: 'string', maxLength: 500 },\n    intent: {\n      type: 'object',\n      required: ['category', 'description'],\n      properties: {\n        category: { type: 'string', maxLength: 40 },\n        description: { type: 'string', maxLength: 200 }\n      }\n    },\n    resolution: {\n      type: 'object',\n      required: ['status', 'likelihood'],\n      properties: {\n        status: { type: 'string', enum: ['resolved', 'unresolved', 'partial', 'unknown'] },\n        likelihood: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    risk: {\n      type: 'object',\n      required: ['escalation'],\n      properties: {\n        escalation: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    customer: {\n      type: 'object',\n      required: ['frustration', 'satisfaction', 'effort'],\n      properties: {\n        frustration: { type: ['string', 'null'], enum: ['low', 'medium', 'high'] },\n        satisfaction: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        effort: { type: ['string', 'null'], enum: ['low', 'medium', 'high'] }\n      }\n    },\n    agent: {\n      type: 'object',\n      required: ['empathy', 'clarity', 'professionalism'],\n      properties: {\n        empathy: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        clarity: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        professionalism: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    emotions: {\n      type: 'array',\n      maxItems: 5,\n      items: {\n        type: 'object',\n        required: ['label', 'intensity'],\n        properties: {\n          label: { type: 'string', maxLength: 40 },\n          intensity: { type: 'integer', minimum: 0, maximum: 100 }\n        }\n      }\n    },\n    important_moments: {\n      type: 'array',\n      maxItems: 6,\n      items: {\n        type: 'object',\n        required: ['seq', 'speaker', 'event'],\n        properties: {\n          seq: { type: 'integer', minimum: 1 },\n          speaker: { type: 'string', maxLength: 40 },\n          event: { type: 'string', maxLength: 200 }\n        }\n      }\n    },\n    sentences: {\n      type: 'array',\n      minItems: 1,\n      items: {\n        type: 'object',\n        required: ['seq', 'speaker', 'text', 'sentiment', 'score', 'confidence', 'emotion'],\n        properties: {\n          seq: { type: 'integer', minimum: 1 },\n          speaker: { type: 'string', maxLength: 40 },\n          text: { type: 'string', minLength: 1, maxLength: 2000 },\n          sentiment: { type: 'string', enum: ['positive', 'neutral', 'negative'] },\n          score: { type: 'integer', minimum: 0, maximum: 100 },\n          confidence: { type: 'number', minimum: 0, maximum: 1 },\n          emotion: { type: 'string', maxLength: 40 },\n          evidence: { type: 'string', maxLength: 200 }\n        }\n      }\n    }\n  }\n};\n\nconst systemPrompt = 'You are CallLens, a precise conversation-intelligence engine. You analyze call transcripts and return ONLY strict JSON matching the provided schema.\\n' +\n  'HARD RULES — these determine your quality score, never violate them:\\n' +\n  '1. Classify sentiment from MEANING and CONTEXT, not keyword matching. Example: \"I am not unhappy\" is NOT negative. Read the conversation, not the dictionary.\\n' +\n  '2. Any metric without direct transcript evidence -> null. NEVER guess.\\n' +\n  '3. agent.* fields (empathy, clarity, professionalism) are null unless a speaker is clearly the agent (agent, rep, support, advisor, etc.).\\n' +\n  '4. customer.* fields are null unless a customer/caller is clearly identifiable. For unlabeled transcripts (speaker unknown_1/unknown_2) never guess which side is which.\\n' +\n  '5. Do NOT expose chain-of-thought. Explanations (summary, evidence, intent.description, important_moments.event) must be short, evidence-backed sentences quoting the transcript.\\n' +\n  '6. Enums: use ONLY the allowed values in the schema. Every sentence must get a sentiment label from positive|neutral|negative.\\n' +\n  '7. Sentences: emit one object per transcript turn (seq must match the input seq numbering exactly). If you cannot split into turns, emit one object per sentence with seq incremented.\\n' +\n  '8. Sentiment score is 0-100 (50 = neutral). Confidence is 0-1.\\n' +\n  '9. important_moments: up to 6 moments that changed the conversation arc. Never invent a seq that does not exist in the transcript.\\n' +\n  '10. emotions: up to 5 aggregate emotion labels with 0-100 intensity.\\n' +\n  'Respond with the JSON object ONLY.';\n\nconst prompt = systemPrompt + '\\n\\nTRANSCRIPT:\\n' + lines;\n\nconst requestBody = {\n  contents: [{ role: 'user', parts: [{ text: prompt }] }],\n  generationConfig: { temperature: 0.1, responseMimeType: 'application/json', responseSchema: schema }\n};\n\nreturn [{ json: { requestBody: requestBody, conversation_id: payload.conversation_id, file_name: payload.file_name || '', GEMINI_API_KEY: apiKey } }];\n"
+        "jsCode": "\nconst inp = $input.first().json || {};\nconst apiKey = String(inp.GEMINI_API_KEY || inp.apiKey || '');\nconst payload = inp.payload || {};\nconst transcript = Array.isArray(payload.transcript) ? payload.transcript : [];\nconst lines = transcript.map(function (t) { return t.speaker + ': ' + t.text; }).join('\\n');\n\n// ── Structured output schema (mirrors n8n/LLM_PROMPT_AND_SCHEMA.md) ──\nconst schema = {\n  type: 'object',\n  required: ['overall_sentiment', 'summary', 'intent', 'resolution', 'risk', 'customer', 'agent', 'emotions', 'important_moments', 'sentences'],\n  properties: {\n    overall_sentiment: {\n      type: 'object',\n      required: ['label', 'score', 'confidence'],\n      properties: {\n        label: { type: 'string', enum: ['positive', 'neutral', 'negative'] },\n        score: { type: 'integer', minimum: 0, maximum: 100 },\n        confidence: { type: 'number', minimum: 0, maximum: 1 }\n      }\n    },\n    summary: { type: 'string', maxLength: 500 },\n    intent: {\n      type: 'object',\n      required: ['category', 'description'],\n      properties: {\n        category: { type: 'string', maxLength: 40 },\n        description: { type: 'string', maxLength: 200 }\n      }\n    },\n    resolution: {\n      type: 'object',\n      required: ['status', 'likelihood'],\n      properties: {\n        status: { type: 'string', enum: ['resolved', 'unresolved', 'partial', 'unknown'] },\n        likelihood: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    risk: {\n      type: 'object',\n      required: ['escalation'],\n      properties: {\n        escalation: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    customer: {\n      type: 'object',\n      required: ['frustration', 'satisfaction', 'effort'],\n      properties: {\n        frustration: { type: ['string', 'null'], enum: ['low', 'medium', 'high'] },\n        satisfaction: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        effort: { type: ['string', 'null'], enum: ['low', 'medium', 'high'] }\n      }\n    },\n    agent: {\n      type: 'object',\n      required: ['empathy', 'clarity', 'professionalism'],\n      properties: {\n        empathy: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        clarity: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        professionalism: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    emotions: {\n      type: 'array',\n      maxItems: 5,\n      items: {\n        type: 'object',\n        required: ['label', 'intensity'],\n        properties: {\n          label: { type: 'string', maxLength: 40 },\n          intensity: { type: 'integer', minimum: 0, maximum: 100 }\n        }\n      }\n    },\n    important_moments: {\n      type: 'array',\n      maxItems: 6,\n      items: {\n        type: 'object',\n        required: ['seq', 'speaker', 'event'],\n        properties: {\n          seq: { type: 'integer', minimum: 1 },\n          speaker: { type: 'string', maxLength: 40 },\n          event: { type: 'string', maxLength: 200 }\n        }\n      }\n    },\n    sentences: {\n      type: 'array',\n      minItems: 1,\n      items: {\n        type: 'object',\n        required: ['seq', 'speaker', 'text', 'sentiment', 'score', 'confidence', 'emotion'],\n        properties: {\n          seq: { type: 'integer', minimum: 1 },\n          speaker: { type: 'string', maxLength: 40 },\n          text: { type: 'string', minLength: 1, maxLength: 2000 },\n          sentiment: { type: 'string', enum: ['positive', 'neutral', 'negative'] },\n          score: { type: 'integer', minimum: 0, maximum: 100 },\n          confidence: { type: 'number', minimum: 0, maximum: 1 },\n          emotion: { type: 'string', maxLength: 40 },\n          evidence: { type: 'string', maxLength: 200 }\n        }\n      }\n    }\n  }\n};\n\nconst systemPrompt = 'You are CallLens, a precise conversation-intelligence engine. You analyze call transcripts and return ONLY strict JSON matching the provided schema.\\n' +\n  'HARD RULES — these determine your quality score, never violate them:\\n' +\n  '1. Classify sentiment from MEANING and CONTEXT, not keyword matching. Example: \"I am not unhappy\" is NOT negative. Read the conversation, not the dictionary.\\n' +\n  '2. Any metric without direct transcript evidence -> null. NEVER guess.\\n' +\n  '3. agent.* fields (empathy, clarity, professionalism) are null unless a speaker is clearly the agent (agent, rep, support, advisor, etc.).\\n' +\n  '4. customer.* fields are null unless a customer/caller is clearly identifiable. For unlabeled transcripts (speaker unknown_1/unknown_2) never guess which side is which.\\n' +\n  '5. Do NOT expose chain-of-thought. Explanations (summary, evidence, intent.description, important_moments.event) must be short, evidence-backed sentences quoting the transcript.\\n' +\n  '6. Enums: use ONLY the allowed values in the schema. Every sentence must get a sentiment label from positive|neutral|negative.\\n' +\n  '7. Sentences: emit one object per transcript turn (seq must match the input seq numbering exactly). If you cannot split into turns, emit one object per sentence with seq incremented.\\n' +\n  '8. Sentiment score is 0-100 (50 = neutral). Confidence is 0-1.\\n' +\n  '9. important_moments: up to 6 moments that changed the conversation arc. Never invent a seq that does not exist in the transcript.\\n' +\n  '10. emotions: up to 5 aggregate emotion labels with 0-100 intensity.\\n' +\n  'Respond with the JSON object ONLY.';\n\nconst prompt = systemPrompt + '\\n\\nTRANSCRIPT:\\n' + lines;\n\nconst requestBody = {\n  contents: [{ role: 'user', parts: [{ text: prompt }] }],\n  // NOTE: no responseSchema — Gemini cannot express nullable unions like\n  // ['integer','null']; it rejects such schemas with \"Proto field is not\n  // repeating\". The full schema is embedded in the prompt instead and the\n  // app's Zod validation enforces the shape.\n  generationConfig: { temperature: 0.1, responseMimeType: 'application/json' }\n};\n\nreturn [{ json: { requestBody: requestBody, conversation_id: payload.conversation_id, file_name: payload.file_name || '', GEMINI_API_KEY: apiKey } }];\n"
       },
       "id": "build",
       "name": "Build Request",
@@ -119,29 +90,12 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "x-goog-api-key",
-              "value": "={{ $json.GEMINI_API_KEY }}"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": true,
-        "bodyType": "json",
-        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
-        "options": {
-          "timeout": 120000
-        }
+        "jsCode": "\n// require('https') — the n8n 2.x httpRequest node mangled JSON bodies here,\n// and Code nodes have neither global fetch nor $helpers. This sends the exact\n// bytes we built (needs NODE_FUNCTION_ALLOW_BUILTIN=crypto,https on the n8n\n// container).\nconst https = require('https');\nconst inp = $input.first().json || {};\nconst payload = JSON.stringify(inp.requestBody || {});\nlet status = 0;\nlet text = '';\nlet parsed = null;\nawait new Promise(function (resolve) {\n  const req = https.request('https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent', {\n    method: 'POST',\n    headers: {\n      'Content-Type': 'application/json',\n      'x-goog-api-key': String(inp.GEMINI_API_KEY || '')\n    }\n  }, function (res) {\n    status = res.statusCode || 0;\n    res.setEncoding('utf8');\n    res.on('data', function (c) { text += c; });\n    res.on('end', function () {\n      try { parsed = JSON.parse(text); } catch (e) { parsed = null; }\n      resolve();\n    });\n  });\n  req.on('error', function (e) { text = String(e); resolve(); });\n  req.write(payload);\n  req.end();\n});\nreturn [{ json: { ...inp, httpStatus: status, geminiResponse: parsed, geminiRaw: text.slice(0, 2000) } }];\n"
       },
       "id": "gemini",
-      "name": "Gemini",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "name": "Call Gemini",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         320,
         480
@@ -149,7 +103,7 @@
     },
     {
       "parameters": {
-        "jsCode": "\n// Extract the JSON text from the Gemini response and parse it. Routing to a\n// 200 vs 502 response happens in the \"Output Valid?\" IF node.\nconst item = $input.first().json;\nconst data = item.json || item || {};\nlet text = '';\nconst candidates = data.candidates || [];\nfor (const c of candidates) {\n  const parts = (c && c.content && c.content.parts) || [];\n  for (const p of parts) {\n    if (p && p.text) text += p.text;\n  }\n}\nlet result = null;\nlet ok = false;\ntry {\n  result = JSON.parse(text);\n  ok = true;\n} catch (e) {\n  ok = false;\n}\nreturn [{ json: { ok: ok, result: result, conversation_id: $('Build Request').first().json.conversation_id } }];\n"
+        "jsCode": "\n// Extract the JSON text from the Gemini response and parse it. Routing to a\n// 200 vs 502 response happens in the \"Output Valid?\" IF node.\nconst item = $input.first().json;\nconst data = (item && item.geminiResponse) || {};\nlet text = '';\nconst candidates = data.candidates || [];\nfor (const c of candidates) {\n  const parts = (c && c.content && c.content.parts) || [];\n  for (const p of parts) {\n    if (p && p.text) text += p.text;\n  }\n}\nlet result = null;\nlet ok = false;\ntry {\n  result = JSON.parse(text);\n  ok = true;\n} catch (e) {\n  ok = false;\n}\nreturn [{ json: { ok: ok, result: result, conversation_id: $('Build Request').first().json.conversation_id } }];\n"
       },
       "id": "validate",
       "name": "Validate Output",
@@ -272,25 +226,14 @@
       "main": [
         [
           {
-            "node": "Webhook Secret",
+            "node": "Config",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Webhook Secret": {
-      "main": [
-        [
-          {
-            "node": "Gemini Key",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Gemini Key": {
+    "Config": {
       "main": [
         [
           {
@@ -334,14 +277,14 @@
       "main": [
         [
           {
-            "node": "Gemini",
+            "node": "Call Gemini",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Gemini": {
+    "Call Gemini": {
       "main": [
         [
           {

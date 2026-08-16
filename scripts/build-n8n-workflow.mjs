@@ -2,16 +2,24 @@
 // workflow. Run with: node scripts/build-n8n-workflow.mjs
 //
 // n8n 2.x compatibility notes (do not regress these):
-//  - Set nodes use the 2.x format: parameters.fields.values[{name,stringValue}]
-//  - Set nodes are CHAINED into the flow (Webhook → Webhook Secret → Gemini Key
-//    → Verify Signature) so their outputs exist at runtime — $('Node') refs to
-//    unexecuted nodes throw "Node 'X' hasn't been executed" in 2.x.
-//  - Code nodes read secrets from the input chain, not from cross-node $() lookups.
+//  - Secrets live in ONE chained Code node ("Config"): chained Code nodes are
+//    guaranteed to carry the input json forward ({...$json}), while n8n 2.x Set
+//    nodes (fields.values) were observed to emit EMPTY {} output in this
+//    container — they silently dropped the webhook payload.
+//  - Code nodes read secrets from the input chain, not from cross-node $() refs
+//    (refs to nodes that didn't execute throw "Node 'X' hasn't been executed").
 import { writeFileSync } from 'node:fs';
 
-// ── values you must paste into the Set nodes after import (n8n editor) ──
+// ── values you must paste into the Config node after import (n8n editor) ──
 const SECRET_PLACEHOLDER = 'PASTE_N8N_WEBHOOK_SECRET_HERE';
 const KEY_PLACEHOLDER = 'PASTE_GEMINI_API_KEY_HERE';
+
+const configCode = `
+// Single place to paste the two secrets. Code-node pass-through is reliable in
+// n8n 2.x (unlike Set nodes, which dropped the payload in this setup).
+const inp = $json || {};
+return [{ json: { ...inp, N8N_WEBHOOK_SECRET: '${SECRET_PLACEHOLDER}', GEMINI_API_KEY: '${KEY_PLACEHOLDER}' } }];
+`;
 
 const verifyCode = `
 const crypto = require('crypto');
@@ -23,8 +31,11 @@ const inp = $input.first().json || {};
 const secret = String(inp.N8N_WEBHOOK_SECRET || inp.webhookSecret || '');
 const headers = inp.headers || {};
 const sig = String(headers['x-signature'] || headers['X-Signature'] || '');
-const body = inp.body || {};
-const computed = crypto.createHmac('sha256', secret).update(JSON.stringify(body)).digest('hex');
+const body = inp.body;
+// n8n 2.x may deliver the body already parsed (object) or as the raw string.
+// JSON.stringify on the parsed object reproduces the exact bytes Next.js signed.
+const bodyStr = typeof body === 'string' ? body : JSON.stringify(body || {});
+const computed = crypto.createHmac('sha256', secret).update(bodyStr).digest('hex');
 const valid = sig.length > 0 && secret.length > 0 && sig === computed;
 return [{ json: { ...inp, valid: valid } }];
 `;
@@ -156,17 +167,55 @@ const prompt = systemPrompt + '\\n\\nTRANSCRIPT:\\n' + lines;
 
 const requestBody = {
   contents: [{ role: 'user', parts: [{ text: prompt }] }],
-  generationConfig: { temperature: 0.1, responseMimeType: 'application/json', responseSchema: schema }
+  // NOTE: no responseSchema — Gemini cannot express nullable unions like
+  // ['integer','null']; it rejects such schemas with "Proto field is not
+  // repeating". The full schema is embedded in the prompt instead and the
+  // app's Zod validation enforces the shape.
+  generationConfig: { temperature: 0.1, responseMimeType: 'application/json' }
 };
 
 return [{ json: { requestBody: requestBody, conversation_id: payload.conversation_id, file_name: payload.file_name || '', GEMINI_API_KEY: apiKey } }];
+`;
+
+const geminiCallCode = `
+// require('https') — the n8n 2.x httpRequest node mangled JSON bodies here,
+// and Code nodes have neither global fetch nor $helpers. This sends the exact
+// bytes we built (needs NODE_FUNCTION_ALLOW_BUILTIN=crypto,https on the n8n
+// container).
+const https = require('https');
+const inp = $input.first().json || {};
+const payload = JSON.stringify(inp.requestBody || {});
+let status = 0;
+let text = '';
+let parsed = null;
+await new Promise(function (resolve) {
+  const req = https.request('https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': String(inp.GEMINI_API_KEY || '')
+    }
+  }, function (res) {
+    status = res.statusCode || 0;
+    res.setEncoding('utf8');
+    res.on('data', function (c) { text += c; });
+    res.on('end', function () {
+      try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
+      resolve();
+    });
+  });
+  req.on('error', function (e) { text = String(e); resolve(); });
+  req.write(payload);
+  req.end();
+});
+return [{ json: { ...inp, httpStatus: status, geminiResponse: parsed, geminiRaw: text.slice(0, 2000) } }];
 `;
 
 const validateCode = `
 // Extract the JSON text from the Gemini response and parse it. Routing to a
 // 200 vs 502 response happens in the "Output Valid?" IF node.
 const item = $input.first().json;
-const data = item.json || item || {};
+const data = (item && item.geminiResponse) || {};
 let text = '';
 const candidates = data.candidates || [];
 for (const c of candidates) {
@@ -204,40 +253,12 @@ const nodes = [
     webhookId: 'calllens-analyze-webhook',
   },
   {
-    parameters: {
-      fields: {
-        values: [
-          {
-            name: 'N8N_WEBHOOK_SECRET',
-            stringValue: SECRET_PLACEHOLDER,
-          },
-        ],
-      },
-      options: {},
-    },
-    id: uid('whsec'),
-    name: 'Webhook Secret',
-    type: 'n8n-nodes-base.set',
-    typeVersion: 3.4,
+    parameters: { jsCode: configCode },
+    id: uid('config'),
+    name: 'Config',
+    type: 'n8n-nodes-base.code',
+    typeVersion: 2,
     position: [220, 0],
-  },
-  {
-    parameters: {
-      fields: {
-        values: [
-          {
-            name: 'GEMINI_API_KEY',
-            stringValue: KEY_PLACEHOLDER,
-          },
-        ],
-      },
-      options: {},
-    },
-    id: uid('gmkey'),
-    name: 'Gemini Key',
-    type: 'n8n-nodes-base.set',
-    typeVersion: 3.4,
-    position: [440, 0],
   },
   {
     parameters: { jsCode: verifyCode },
@@ -277,28 +298,11 @@ const nodes = [
     position: [320, 260],
   },
   {
-    parameters: {
-      method: 'POST',
-      url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent',
-      sendHeaders: true,
-      headerParameters: {
-        parameters: [
-          {
-            name: 'x-goog-api-key',
-            value: '={{ $json.GEMINI_API_KEY }}',
-          },
-        ],
-      },
-      sendBody: true,
-      specifyBody: true,
-      bodyType: 'json',
-      jsonBody: "={{ JSON.stringify($json.requestBody) }}",
-      options: { timeout: 120000 },
-    },
+    parameters: { jsCode: geminiCallCode },
     id: uid('gemini'),
-    name: 'Gemini',
-    type: 'n8n-nodes-base.httpRequest',
-    typeVersion: 4.2,
+    name: 'Call Gemini',
+    type: 'n8n-nodes-base.code',
+    typeVersion: 2,
     position: [320, 480],
   },
   {
@@ -384,9 +388,8 @@ const nodes = [
 ];
 
 const connections = {
-  Webhook: { main: [[{ node: 'Webhook Secret', type: 'main', index: 0 }]] },
-  'Webhook Secret': { main: [[{ node: 'Gemini Key', type: 'main', index: 0 }]] },
-  'Gemini Key': { main: [[{ node: 'Verify Signature', type: 'main', index: 0 }]] },
+  Webhook: { main: [[{ node: 'Config', type: 'main', index: 0 }]] },
+  Config: { main: [[{ node: 'Verify Signature', type: 'main', index: 0 }]] },
   'Verify Signature': {
     main: [[{ node: 'Valid Signature?', type: 'main', index: 0 }]],
   },
@@ -396,8 +399,8 @@ const connections = {
       [{ node: 'Respond 401', type: 'main', index: 0 }],
     ],
   },
-  'Build Request': { main: [[{ node: 'Gemini', type: 'main', index: 0 }]] },
-  Gemini: { main: [[{ node: 'Validate Output', type: 'main', index: 0 }]] },
+  'Build Request': { main: [[{ node: 'Call Gemini', type: 'main', index: 0 }]] },
+  'Call Gemini': { main: [[{ node: 'Validate Output', type: 'main', index: 0 }]] },
   'Validate Output': {
     main: [[{ node: 'Output Valid?', type: 'main', index: 0 }]],
   },
