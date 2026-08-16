@@ -1,0 +1,10 @@
+[00:00:02] Agent: Thank you for calling CallLens support, my name is Sarah, how can I help?
+[00:00:09] Customer: Yeah hi, my internet has been dropping every few hours since Monday and it is really affecting my work calls.
+[00:00:18] Agent: I'm sorry to hear that, I know how disruptive that is. Let me pull up your line and check the signal history.
+[00:00:27] Customer: Okay, thank you. I already restarted the router twice like the website suggested but it keeps happening.
+[00:00:35] Agent: Good that you tried that — it rules out a simple crash. The logs show intermittent drops consistent with a line fault. I'll dispatch a technician tomorrow morning.
+[00:00:44] Customer: Tomorrow morning works for me. How long would that take to fix?
+[00:00:50] Agent: Most line faults are resolved the same visit, usually within the appointment window.
+[00:00:58] Customer: Great, that's reassuring. Thank you for actually looking into it.
+[00:01:05] Agent: You're welcome. I'll text you the technician's slot shortly. Anything else?
+[00:01:10] Customer: No that's it, thanks again. Bye.

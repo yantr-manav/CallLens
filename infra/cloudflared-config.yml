@@ -1,0 +1,25 @@
+# CallLens — Cloudflare Tunnel config (optional but recommended)
+# Free, no open inbound ports, automatic HTTPS.
+#
+# Steps:
+#   1. Create a free Cloudflare account → Zero Trust → Networks → Tunnels
+#   2. Create a "Named Tunnel" and copy its token
+#   3. Put the token in infra/.env  →  CLOUDFLARE_TUNNEL_TOKEN=
+#   4. Start the tunnel container:  docker compose --profile tunnel up -d
+#   5. In the Cloudflare dashboard add a public hostname for the tunnel:
+#        service type: HTTP   url: n8n:5678
+#      (service name is the docker-compose service, resolved on the compose network)
+#   6. Your n8n editor is live at https://<hostname> with automatic HTTPS.
+#
+# The WEBHOOK_URL env var for n8n should then be set to
+#   https://<hostname>
+# and the Next.js N8N_WEBHOOK_URL to
+#   https://<hostname>/webhook/calllens-analyze
+
+tunnel: calllens-n8n
+credentials-file: /home/nonroot/.cloudflared/<tunnel-id>.json
+
+ingress:
+  - hostname: n8n.example.com
+    service: http://n8n:5678
+  - service: http_status:404

@@ -1,0 +1,10 @@
+Customer: Hi, I've been waiting three days for someone to help me with my bill. This is really frustrating.
+Agent: I'm really sorry about the wait, I completely understand the frustration. Let me take a look at your account right now.
+Customer: Thank you. I was charged twice for the same plan renewal and nobody has responded to my emails.
+Agent: I apologize for that. I can see the duplicate charge here. I'm going to refund the second one immediately.
+Customer: Oh great, thank you. That's all I wanted.
+Agent: You're welcome. The refund is processed and should show up in three to five business days. Is there anything else I can help with?
+Customer: No, that's everything. I appreciate you fixing it so quickly.
+Agent: Absolutely, and again I'm sorry it took reaching out here to get it sorted. Have a great day.
+Customer: You too, thanks. Goodbye.
+Agent: Goodbye!

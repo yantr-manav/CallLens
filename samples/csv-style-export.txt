@@ -1,0 +1,11 @@
+timestamp,speaker,text
+00:00:05,Customer,I was promised a delivery on Friday and it is now Monday with no update.
+00:00:12,Agent,I apologize for the delay. Let me check the tracking system right now.
+00:00:20,Customer,I have a thing event Thursday and I really need the product before then.
+00:00:28,Agent,I completely understand. I can see the package is held at the regional hub. I will escalate this to priority delivery.
+00:00:35,Customer,That would be great. Will it really get here in time?
+00:00:40,Agent,Yes, priority delivery guarantees next-day arrival, so it will be there Wednesday at the latest.
+00:00:47,Customer,Okay, thank you. That takes the stress off.
+00:00:52,Agent,Of course. You will get a confirmation email with the new delivery window in a few minutes.
+00:00:58,Customer,Perfect, I will watch for it. Thanks for the quick help.
+00:01:03,Agent,My pleasure. Have a good afternoon and enjoy the event.

@@ -1,0 +1,35 @@
+1
+00:00:01,000 --> 00:00:06,000
+Agent: Welcome to tech support, my name is David, who am I speaking with today?
+
+2
+00:00:07,000 --> 00:00:16,000
+Customer: Hi David, it's Maria. My account says my subscription is cancelled but I never cancelled anything and I am really worried.
+
+3
+00:00:17,000 --> 00:00:26,000
+Agent: I'm sorry to hear that, Maria. Let me take a look at your account and see what happened with the subscription.
+
+4
+00:00:27,000 --> 00:00:40,000
+Customer: Thank you. I rely on it for my business and this is the second issue this month, it is very frustrating.
+
+5
+00:00:41,000 --> 00:00:54,000
+Agent: I completely understand. I can see the cancellation was triggered by a failed payment. I am reinstating it now and enabling a grace period so it does not happen again.
+
+6
+00:00:55,000 --> 00:01:02,000
+Customer: Oh that is a relief. Thank you for explaining what happened and fixing it.
+
+7
+00:01:03,000 --> 00:01:10,000
+Agent: Absolutely. I will also send you a summary email. Is there anything else I can help with?
+
+8
+00:01:11,000 --> 00:01:14,000
+Customer: No, that is everything. Thank you so much. Goodbye.
+
+9
+00:01:15,000 --> 00:01:18,000
+Agent: Goodbye, Maria, and have a great day.
