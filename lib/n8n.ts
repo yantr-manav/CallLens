@@ -110,13 +110,18 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// ── v2 → v1 normalization ──
-// The n8n prompt (n8n/LLM_PROMPT_AND_SCHEMA.md) asks Gemini for a richer v2
-// shape: overall_sentiment as a string, overall_sentiment_score, confidence,
-// customer.{satisfaction_start,satisfaction_end,churn_risk}, emotions with
-// `emotion` keys and no resolution/risk blocks. The app's canonical shape is
-// v1 (§8.4) — DB columns and dashboard are built around it — so v2 is mapped
-// here, at the ONLY place n8n output enters the app.
+// ── v1 normalization ──
+// Gemini is prompted with a rich schema (n8n/LLM_PROMPT_AND_SCHEMA.md) but
+// does NOT reliably follow it key-for-key across runs — observed variants:
+//   flat v2:  overall_sentiment:"positive", overall_sentiment_score, confidence,
+//             customer.{satisfaction_start,satisfaction_end,churn_risk},
+//             emotions[].{emotion,intensity}
+//   nested:   overall_sentiment:{score,label,confidence}, customer.{initial_
+//             sentiment,final_sentiment,satisfaction_score,intent:{category,
+//             description}}, important_moments[].{seq,event,impact}
+// The app's canonical shape is v1 (§8.4) — DB columns and dashboard are built
+// around it — so ANY variant is mapped here, at the ONLY place n8n output
+// enters the app. Fallbacks are only used when the value is truly absent.
 export function normalizeAnalysisResult(
   input: unknown
 ): AnalysisResultSchemaType | null {
@@ -129,6 +134,17 @@ export function normalizeAnalysisResult(
 
   const asObj = (v: unknown): Record<string, unknown> =>
     v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
+  // First defined non-null value across candidate keys.
+  const pick = (
+    o: Record<string, unknown>,
+    ...keys: string[]
+  ): unknown => {
+    for (const k of keys) {
+      const v = o[k];
+      if (v !== undefined && v !== null) return v;
+    }
+    return undefined;
+  };
   const num = (v: unknown, max = 100): number | null => {
     if (typeof v !== 'number' || !Number.isFinite(v)) return null;
     return Math.min(max, Math.max(0, v));
@@ -140,38 +156,49 @@ export function normalizeAnalysisResult(
   const sentiment = (v: unknown): 'positive' | 'neutral' | 'negative' =>
     v === 'positive' || v === 'neutral' || v === 'negative' ? v : 'neutral';
 
+  // overall_sentiment: string (flat v2) or object (nested variant).
+  const os = asObj(raw.overall_sentiment);
+  const osLabel = sentiment(
+    typeof raw.overall_sentiment === 'string'
+      ? raw.overall_sentiment
+      : pick(os, 'label', 'sentiment', 'value')
+  );
+  const osScore = num(
+    pick(raw, 'overall_sentiment_score', 'overall_score') ?? pick(os, 'score')
+  );
+  const conf = num(pick(raw, 'confidence') ?? pick(os, 'confidence'), 1) ?? 0.5;
+
+  // intent: top-level or nested inside customer.
   const customer = asObj(raw.customer);
-  const agent = asObj(raw.agent);
-  const intent = asObj(raw.intent);
-  const conf = num(raw.confidence, 1) ?? 0.5;
+  const intent = asObj(raw.intent ?? pick(customer, 'intent'));
 
   const emotions = (Array.isArray(raw.emotions) ? raw.emotions : [])
     .filter((e): e is Record<string, unknown> => !!e && typeof e === 'object')
     .slice(0, 10)
     .map((e) => ({
-      label: label(e.emotion ?? e.label, 'unknown').slice(0, 40),
-      intensity: num(e.intensity) ?? 0,
+      label: label(pick(e, 'emotion', 'label', 'name'), 'unknown').slice(0, 40),
+      intensity: num(pick(e, 'intensity', 'score')) ?? 0,
     }));
 
   const moments = (Array.isArray(raw.important_moments) ? raw.important_moments : [])
     .filter((m): m is Record<string, unknown> => !!m && typeof m === 'object')
     .slice(0, 10)
     .map((m) => ({
-      seq: num(m.seq) ?? 1,
-      speaker: label(m.speaker, '').slice(0, 40),
-      event: label(m.event, 'Key moment.').slice(0, 200),
+      seq: num(pick(m, 'seq')) ?? 1,
+      speaker: label(pick(m, 'speaker'), '').slice(0, 40),
+      event: label(pick(m, 'event', 'description', 'summary'), 'Key moment.').slice(0, 200),
     }));
 
-  const sentences = (Array.isArray(raw.sentences) ? raw.sentences : [])
+  const sentences = (Array.isArray(raw.sentences) ? raw.sentences : Array.isArray(raw.turns) ? raw.turns : [])
     .filter((s): s is Record<string, unknown> => !!s && typeof s === 'object')
     .map((s) => ({
-      seq: num(s.seq) ?? 1,
-      speaker: label(s.speaker, '').slice(0, 40),
-      text: label(s.text, '').slice(0, 2000),
-      sentiment: sentiment(s.sentiment),
-      score: num(s.score ?? s.sentiment_score) ?? 50,
-      confidence: num(s.confidence, 1) ?? 0.5,
-      emotion: label(s.emotion, 'neutral').slice(0, 40),
+      seq: num(pick(s, 'seq')) ?? 1,
+      speaker: label(pick(s, 'speaker'), '').slice(0, 40),
+      text: label(pick(s, 'text'), '').slice(0, 2000),
+      sentiment: sentiment(pick(s, 'sentiment', 'label')),
+      score: num(pick(s, 'score', 'sentiment_score')) ?? 50,
+      confidence: num(pick(s, 'confidence', 'sentiment_confidence'), 1) ?? 0.5,
+      emotion: label(pick(s, 'emotion'), 'neutral').slice(0, 40),
       ...(s.evidence ? { evidence: label(s.evidence, '').slice(0, 200) } : {}),
     }));
 
@@ -179,26 +206,28 @@ export function normalizeAnalysisResult(
 
   const mapped = {
     overall_sentiment: {
-      label: sentiment(raw.overall_sentiment),
-      score: num(raw.overall_sentiment_score) ?? 50,
+      label: osLabel,
+      score: osScore ?? 50,
       confidence: conf,
     },
     summary: label(raw.summary, 'No summary available.').slice(0, 500),
     intent: {
-      category: label(intent.category, 'general').slice(0, 40),
-      description: label(intent.description, 'No description available.').slice(0, 200),
+      category: label(pick(intent, 'category', 'name', 'type'), 'general').slice(0, 40),
+      description: label(pick(intent, 'description', 'summary'), 'No description available.').slice(0, 200),
     },
     resolution: { status: 'unknown', likelihood: null },
     risk: { escalation: null },
     customer: {
       frustration: null,
-      satisfaction: num(customer.satisfaction_end ?? customer.satisfaction),
+      satisfaction: num(
+        pick(customer, 'satisfaction_end', 'satisfaction_score', 'satisfaction', 'final_satisfaction')
+      ),
       effort: null,
     },
     agent: {
-      empathy: num(agent.empathy),
-      clarity: num(agent.clarity),
-      professionalism: num(agent.professionalism),
+      empathy: num(pick(asObj(raw.agent), 'empathy', 'empathy_score')),
+      clarity: num(pick(asObj(raw.agent), 'clarity', 'clarity_score')),
+      professionalism: num(pick(asObj(raw.agent), 'professionalism', 'professionalism_score')),
     },
     emotions,
     important_moments: moments,
