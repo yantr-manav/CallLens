@@ -204,11 +204,30 @@ export function normalizeAnalysisResult(
 
   if (sentences.length === 0) return null;
 
+  // If the model omitted the aggregate (observed across runs), derive it
+  // honestly from the per-sentence data it did return.
+  const sentenceScores = sentences
+    .map((s) => s.score)
+    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+  const mean = (arr: number[]): number =>
+    arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+  const osLabelRaw = typeof raw.overall_sentiment === 'string'
+    ? raw.overall_sentiment
+    : pick(os, 'label', 'sentiment', 'value');
+  const osScoreFinal = osScore ?? (sentenceScores.length ? Math.round(mean(sentenceScores)) : 50);
+  const osConfFinal = raw.confidence !== undefined || os.confidence !== undefined
+    ? conf
+    : mean(sentences.map((s) => s.confidence));
+  const osLabelFinal =
+    osLabelRaw === undefined && sentenceScores.length > 0
+      ? osScoreFinal >= 60 ? 'positive' : osScoreFinal <= 40 ? 'negative' : 'neutral'
+      : sentiment(osLabelRaw);
+
   const mapped = {
     overall_sentiment: {
-      label: osLabel,
-      score: osScore ?? 50,
-      confidence: conf,
+      label: osLabelFinal,
+      score: osScoreFinal,
+      confidence: osConfFinal,
     },
     summary: label(raw.summary, 'No summary available.').slice(0, 500),
     intent: {
