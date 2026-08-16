@@ -43,7 +43,7 @@ return [{ json: { ...inp, valid: valid } }];
 const buildCode = `
 const inp = $input.first().json || {};
 const apiKey = String(inp.GEMINI_API_KEY || inp.apiKey || '');
-const payload = inp.payload || {};
+const payload = inp.payload || inp.body || {};
 const transcript = Array.isArray(payload.transcript) ? payload.transcript : [];
 const lines = transcript.map(function (t) { return t.speaker + ': ' + t.text; }).join('\\n');
 
