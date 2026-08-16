@@ -1,0 +1,45 @@
+# dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# next.js
+.next/
+out/
+build/
+
+# env & secrets
+.env
+.env.local
+.env.*.local
+infra/.env
+
+# n8n local data (never commit workflow credentials/data dumps)
+n8n_data/
+infra/n8n_data/
+
+# supabase local
+.supabase/
+
+# local demo store (demo mode persistence)
+.local-store/
+
+# vercel
+.vercel
+
+# logs
+*.log
+npm-debug.log*
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# testing
+coverage/
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
