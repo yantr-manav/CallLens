@@ -1,24 +1,38 @@
 // Generates n8n/CALLLENS_ANALYZE_CONVERSATION.json — the importable n8n
 // workflow. Run with: node scripts/build-n8n-workflow.mjs
+//
+// n8n 2.x compatibility notes (do not regress these):
+//  - Set nodes use the 2.x format: parameters.fields.values[{name,stringValue}]
+//  - Set nodes are CHAINED into the flow (Webhook → Webhook Secret → Gemini Key
+//    → Verify Signature) so their outputs exist at runtime — $('Node') refs to
+//    unexecuted nodes throw "Node 'X' hasn't been executed" in 2.x.
+//  - Code nodes read secrets from the input chain, not from cross-node $() lookups.
 import { writeFileSync } from 'node:fs';
+
+// ── values you must paste into the Set nodes after import (n8n editor) ──
+const SECRET_PLACEHOLDER = 'PASTE_N8N_WEBHOOK_SECRET_HERE';
+const KEY_PLACEHOLDER = 'PASTE_GEMINI_API_KEY_HERE';
 
 const verifyCode = `
 const crypto = require('crypto');
-// HMAC-SHA256 verification (build plan §8.5). The secret lives in the
-// "Webhook Secret" Set node (paste the same value as N8N_WEBHOOK_SECRET).
+// HMAC-SHA256 verification (build plan §8.5). The secret arrives via the
+// "Webhook Secret" Set node chained upstream (field N8N_WEBHOOK_SECRET).
 // JSON.stringify preserves the key order of the received body, so it matches
 // the string Next.js signed.
-const secret = $('Webhook Secret').first().json.webhookSecret;
-const headers = $input.first().json.headers || {};
+const inp = $input.first().json || {};
+const secret = String(inp.N8N_WEBHOOK_SECRET || inp.webhookSecret || '');
+const headers = inp.headers || {};
 const sig = String(headers['x-signature'] || headers['X-Signature'] || '');
-const body = $input.first().json.body || {};
-const computed = crypto.createHmac('sha256', String(secret)).update(JSON.stringify(body)).digest('hex');
-const valid = sig.length > 0 && sig === computed;
-return [{ json: { valid: valid, payload: body } }];
+const body = inp.body || {};
+const computed = crypto.createHmac('sha256', secret).update(JSON.stringify(body)).digest('hex');
+const valid = sig.length > 0 && secret.length > 0 && sig === computed;
+return [{ json: { ...inp, valid: valid } }];
 `;
 
 const buildCode = `
-const payload = $input.first().json.payload || {};
+const inp = $input.first().json || {};
+const apiKey = String(inp.GEMINI_API_KEY || inp.apiKey || '');
+const payload = inp.payload || {};
 const transcript = Array.isArray(payload.transcript) ? payload.transcript : [];
 const lines = transcript.map(function (t) { return t.speaker + ': ' + t.text; }).join('\\n');
 
@@ -145,7 +159,7 @@ const requestBody = {
   generationConfig: { temperature: 0.1, responseMimeType: 'application/json', responseSchema: schema }
 };
 
-return [{ json: { requestBody: requestBody, conversation_id: payload.conversation_id, file_name: payload.file_name || '' } }];
+return [{ json: { requestBody: requestBody, conversation_id: payload.conversation_id, file_name: payload.file_name || '', GEMINI_API_KEY: apiKey } }];
 `;
 
 const validateCode = `
@@ -191,13 +205,11 @@ const nodes = [
   },
   {
     parameters: {
-      assignments: {
-        assignments: [
+      fields: {
+        values: [
           {
-            id: uid('a1'),
-            name: 'webhookSecret',
-            value: 'PASTE_N8N_WEBHOOK_SECRET_HERE',
-            type: 'string',
+            name: 'N8N_WEBHOOK_SECRET',
+            stringValue: SECRET_PLACEHOLDER,
           },
         ],
       },
@@ -206,18 +218,16 @@ const nodes = [
     id: uid('whsec'),
     name: 'Webhook Secret',
     type: 'n8n-nodes-base.set',
-    typeVersion: 3,
-    position: [460, 0],
+    typeVersion: 3.4,
+    position: [220, 0],
   },
   {
     parameters: {
-      assignments: {
-        assignments: [
+      fields: {
+        values: [
           {
-            id: uid('a2'),
-            name: 'apiKey',
-            value: 'PASTE_GEMINI_API_KEY_HERE',
-            type: 'string',
+            name: 'GEMINI_API_KEY',
+            stringValue: KEY_PLACEHOLDER,
           },
         ],
       },
@@ -226,8 +236,8 @@ const nodes = [
     id: uid('gmkey'),
     name: 'Gemini Key',
     type: 'n8n-nodes-base.set',
-    typeVersion: 3,
-    position: [460, 160],
+    typeVersion: 3.4,
+    position: [440, 0],
   },
   {
     parameters: { jsCode: verifyCode },
@@ -235,7 +245,7 @@ const nodes = [
     name: 'Verify Signature',
     type: 'n8n-nodes-base.code',
     typeVersion: 2,
-    position: [0, 220],
+    position: [660, 0],
   },
   {
     parameters: {
@@ -256,7 +266,7 @@ const nodes = [
     name: 'Valid Signature?',
     type: 'n8n-nodes-base.if',
     typeVersion: 2,
-    position: [0, 440],
+    position: [880, 0],
   },
   {
     parameters: { jsCode: buildCode },
@@ -264,7 +274,7 @@ const nodes = [
     name: 'Build Request',
     type: 'n8n-nodes-base.code',
     typeVersion: 2,
-    position: [-320, 660],
+    position: [320, 260],
   },
   {
     parameters: {
@@ -275,21 +285,21 @@ const nodes = [
         parameters: [
           {
             name: 'x-goog-api-key',
-            value: "={{ $('Gemini Key').first().json.apiKey }}",
+            value: '={{ $json.GEMINI_API_KEY }}',
           },
         ],
       },
       sendBody: true,
       specifyBody: true,
       bodyType: 'json',
-      jsonBody: "={{ JSON.stringify($('Build Request').first().json.requestBody) }}",
+      jsonBody: "={{ JSON.stringify($json.requestBody) }}",
       options: { timeout: 120000 },
     },
     id: uid('gemini'),
     name: 'Gemini',
     type: 'n8n-nodes-base.httpRequest',
     typeVersion: 4.2,
-    position: [-320, 880],
+    position: [320, 480],
   },
   {
     parameters: { jsCode: validateCode },
@@ -297,7 +307,7 @@ const nodes = [
     name: 'Validate Output',
     type: 'n8n-nodes-base.code',
     typeVersion: 2,
-    position: [-320, 1100],
+    position: [320, 700],
   },
   {
     parameters: {
@@ -318,7 +328,7 @@ const nodes = [
     name: 'Output Valid?',
     type: 'n8n-nodes-base.if',
     typeVersion: 2,
-    position: [-320, 1320],
+    position: [320, 920],
   },
   {
     parameters: {
@@ -335,7 +345,7 @@ const nodes = [
     name: 'Respond 200',
     type: 'n8n-nodes-base.respondToWebhook',
     typeVersion: 1.1,
-    position: [-520, 1540],
+    position: [120, 1140],
   },
   {
     parameters: {
@@ -352,7 +362,7 @@ const nodes = [
     name: 'Respond 401',
     type: 'n8n-nodes-base.respondToWebhook',
     typeVersion: 1.1,
-    position: [320, 660],
+    position: [1080, 260],
   },
   {
     parameters: {
@@ -369,12 +379,14 @@ const nodes = [
     name: 'Respond 502',
     type: 'n8n-nodes-base.respondToWebhook',
     typeVersion: 1.1,
-    position: [80, 1540],
+    position: [520, 1140],
   },
 ];
 
 const connections = {
-  Webhook: { main: [[{ node: 'Verify Signature', type: 'main', index: 0 }]] },
+  Webhook: { main: [[{ node: 'Webhook Secret', type: 'main', index: 0 }]] },
+  'Webhook Secret': { main: [[{ node: 'Gemini Key', type: 'main', index: 0 }]] },
+  'Gemini Key': { main: [[{ node: 'Verify Signature', type: 'main', index: 0 }]] },
   'Verify Signature': {
     main: [[{ node: 'Valid Signature?', type: 'main', index: 0 }]],
   },
@@ -401,12 +413,14 @@ const workflow = {
   name: 'CALLLENS_ANALYZE_CONVERSATION',
   nodes,
   connections,
-  active: false,
+  // Imported as ACTIVE: delete the old workflow first so the webhook path
+  // (calllens-analyze) doesn't collide.
+  active: true,
   settings: {},
   pinData: {},
   meta: {
     description:
-      'CallLens analysis pipeline: HMAC-verified webhook -> Gemini structured output -> respond. Deterministic pipeline, not an agent.',
+      'CallLens analysis pipeline: HMAC-verified webhook -> Gemini 3.6 Flash structured output -> respond. Deterministic pipeline, not an agent.',
   },
 };
 
@@ -415,3 +429,15 @@ writeFileSync(
   JSON.stringify(workflow, null, 2)
 );
 console.log('wrote n8n/CALLLENS_ANALYZE_CONVERSATION.json');
+
+// ── structural self-check: every connection references a real node ──
+const names = new Set(nodes.map((n) => n.name));
+for (const [from, conns] of Object.entries(connections)) {
+  if (!names.has(from)) throw new Error(`connection source missing: ${from}`);
+  for (const branch of conns.main) {
+    for (const t of branch) {
+      if (!names.has(t.node)) throw new Error(`connection target missing: ${t.node}`);
+    }
+  }
+}
+console.log('structural check: all nodes & connections valid');

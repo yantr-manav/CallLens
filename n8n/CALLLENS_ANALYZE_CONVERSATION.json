@@ -20,13 +20,11 @@
     },
     {
       "parameters": {
-        "assignments": {
-          "assignments": [
+        "fields": {
+          "values": [
             {
-              "id": "a1",
-              "name": "webhookSecret",
-              "value": "PASTE_N8N_WEBHOOK_SECRET_HERE",
-              "type": "string"
+              "name": "N8N_WEBHOOK_SECRET",
+              "stringValue": "PASTE_N8N_WEBHOOK_SECRET_HERE"
             }
           ]
         },
@@ -35,21 +33,19 @@
       "id": "whsec",
       "name": "Webhook Secret",
       "type": "n8n-nodes-base.set",
-      "typeVersion": 3,
+      "typeVersion": 3.4,
       "position": [
-        460,
+        220,
         0
       ]
     },
     {
       "parameters": {
-        "assignments": {
-          "assignments": [
+        "fields": {
+          "values": [
             {
-              "id": "a2",
-              "name": "apiKey",
-              "value": "PASTE_GEMINI_API_KEY_HERE",
-              "type": "string"
+              "name": "GEMINI_API_KEY",
+              "stringValue": "PASTE_GEMINI_API_KEY_HERE"
             }
           ]
         },
@@ -58,23 +54,23 @@
       "id": "gmkey",
       "name": "Gemini Key",
       "type": "n8n-nodes-base.set",
-      "typeVersion": 3,
+      "typeVersion": 3.4,
       "position": [
-        460,
-        160
+        440,
+        0
       ]
     },
     {
       "parameters": {
-        "jsCode": "\nconst crypto = require('crypto');\n// HMAC-SHA256 verification (build plan §8.5). The secret lives in the\n// \"Webhook Secret\" Set node (paste the same value as N8N_WEBHOOK_SECRET).\n// JSON.stringify preserves the key order of the received body, so it matches\n// the string Next.js signed.\nconst secret = $('Webhook Secret').first().json.webhookSecret;\nconst headers = $input.first().json.headers || {};\nconst sig = String(headers['x-signature'] || headers['X-Signature'] || '');\nconst body = $input.first().json.body || {};\nconst computed = crypto.createHmac('sha256', String(secret)).update(JSON.stringify(body)).digest('hex');\nconst valid = sig.length > 0 && sig === computed;\nreturn [{ json: { valid: valid, payload: body } }];\n"
+        "jsCode": "\nconst crypto = require('crypto');\n// HMAC-SHA256 verification (build plan §8.5). The secret arrives via the\n// \"Webhook Secret\" Set node chained upstream (field N8N_WEBHOOK_SECRET).\n// JSON.stringify preserves the key order of the received body, so it matches\n// the string Next.js signed.\nconst inp = $input.first().json || {};\nconst secret = String(inp.N8N_WEBHOOK_SECRET || inp.webhookSecret || '');\nconst headers = inp.headers || {};\nconst sig = String(headers['x-signature'] || headers['X-Signature'] || '');\nconst body = inp.body || {};\nconst computed = crypto.createHmac('sha256', secret).update(JSON.stringify(body)).digest('hex');\nconst valid = sig.length > 0 && secret.length > 0 && sig === computed;\nreturn [{ json: { ...inp, valid: valid } }];\n"
       },
       "id": "verify",
       "name": "Verify Signature",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        0,
-        220
+        660,
+        0
       ]
     },
     {
@@ -104,21 +100,21 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        0,
-        440
+        880,
+        0
       ]
     },
     {
       "parameters": {
-        "jsCode": "\nconst payload = $input.first().json.payload || {};\nconst transcript = Array.isArray(payload.transcript) ? payload.transcript : [];\nconst lines = transcript.map(function (t) { return t.speaker + ': ' + t.text; }).join('\\n');\n\n// ── Structured output schema (mirrors n8n/LLM_PROMPT_AND_SCHEMA.md) ──\nconst schema = {\n  type: 'object',\n  required: ['overall_sentiment', 'summary', 'intent', 'resolution', 'risk', 'customer', 'agent', 'emotions', 'important_moments', 'sentences'],\n  properties: {\n    overall_sentiment: {\n      type: 'object',\n      required: ['label', 'score', 'confidence'],\n      properties: {\n        label: { type: 'string', enum: ['positive', 'neutral', 'negative'] },\n        score: { type: 'integer', minimum: 0, maximum: 100 },\n        confidence: { type: 'number', minimum: 0, maximum: 1 }\n      }\n    },\n    summary: { type: 'string', maxLength: 500 },\n    intent: {\n      type: 'object',\n      required: ['category', 'description'],\n      properties: {\n        category: { type: 'string', maxLength: 40 },\n        description: { type: 'string', maxLength: 200 }\n      }\n    },\n    resolution: {\n      type: 'object',\n      required: ['status', 'likelihood'],\n      properties: {\n        status: { type: 'string', enum: ['resolved', 'unresolved', 'partial', 'unknown'] },\n        likelihood: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    risk: {\n      type: 'object',\n      required: ['escalation'],\n      properties: {\n        escalation: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    customer: {\n      type: 'object',\n      required: ['frustration', 'satisfaction', 'effort'],\n      properties: {\n        frustration: { type: ['string', 'null'], enum: ['low', 'medium', 'high'] },\n        satisfaction: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        effort: { type: ['string', 'null'], enum: ['low', 'medium', 'high'] }\n      }\n    },\n    agent: {\n      type: 'object',\n      required: ['empathy', 'clarity', 'professionalism'],\n      properties: {\n        empathy: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        clarity: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        professionalism: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    emotions: {\n      type: 'array',\n      maxItems: 5,\n      items: {\n        type: 'object',\n        required: ['label', 'intensity'],\n        properties: {\n          label: { type: 'string', maxLength: 40 },\n          intensity: { type: 'integer', minimum: 0, maximum: 100 }\n        }\n      }\n    },\n    important_moments: {\n      type: 'array',\n      maxItems: 6,\n      items: {\n        type: 'object',\n        required: ['seq', 'speaker', 'event'],\n        properties: {\n          seq: { type: 'integer', minimum: 1 },\n          speaker: { type: 'string', maxLength: 40 },\n          event: { type: 'string', maxLength: 200 }\n        }\n      }\n    },\n    sentences: {\n      type: 'array',\n      minItems: 1,\n      items: {\n        type: 'object',\n        required: ['seq', 'speaker', 'text', 'sentiment', 'score', 'confidence', 'emotion'],\n        properties: {\n          seq: { type: 'integer', minimum: 1 },\n          speaker: { type: 'string', maxLength: 40 },\n          text: { type: 'string', minLength: 1, maxLength: 2000 },\n          sentiment: { type: 'string', enum: ['positive', 'neutral', 'negative'] },\n          score: { type: 'integer', minimum: 0, maximum: 100 },\n          confidence: { type: 'number', minimum: 0, maximum: 1 },\n          emotion: { type: 'string', maxLength: 40 },\n          evidence: { type: 'string', maxLength: 200 }\n        }\n      }\n    }\n  }\n};\n\nconst systemPrompt = 'You are CallLens, a precise conversation-intelligence engine. You analyze call transcripts and return ONLY strict JSON matching the provided schema.\\n' +\n  'HARD RULES — these determine your quality score, never violate them:\\n' +\n  '1. Classify sentiment from MEANING and CONTEXT, not keyword matching. Example: \"I am not unhappy\" is NOT negative. Read the conversation, not the dictionary.\\n' +\n  '2. Any metric without direct transcript evidence -> null. NEVER guess.\\n' +\n  '3. agent.* fields (empathy, clarity, professionalism) are null unless a speaker is clearly the agent (agent, rep, support, advisor, etc.).\\n' +\n  '4. customer.* fields are null unless a customer/caller is clearly identifiable. For unlabeled transcripts (speaker unknown_1/unknown_2) never guess which side is which.\\n' +\n  '5. Do NOT expose chain-of-thought. Explanations (summary, evidence, intent.description, important_moments.event) must be short, evidence-backed sentences quoting the transcript.\\n' +\n  '6. Enums: use ONLY the allowed values in the schema. Every sentence must get a sentiment label from positive|neutral|negative.\\n' +\n  '7. Sentences: emit one object per transcript turn (seq must match the input seq numbering exactly). If you cannot split into turns, emit one object per sentence with seq incremented.\\n' +\n  '8. Sentiment score is 0-100 (50 = neutral). Confidence is 0-1.\\n' +\n  '9. important_moments: up to 6 moments that changed the conversation arc. Never invent a seq that does not exist in the transcript.\\n' +\n  '10. emotions: up to 5 aggregate emotion labels with 0-100 intensity.\\n' +\n  'Respond with the JSON object ONLY.';\n\nconst prompt = systemPrompt + '\\n\\nTRANSCRIPT:\\n' + lines;\n\nconst requestBody = {\n  contents: [{ role: 'user', parts: [{ text: prompt }] }],\n  generationConfig: { temperature: 0.1, responseMimeType: 'application/json', responseSchema: schema }\n};\n\nreturn [{ json: { requestBody: requestBody, conversation_id: payload.conversation_id, file_name: payload.file_name || '' } }];\n"
+        "jsCode": "\nconst inp = $input.first().json || {};\nconst apiKey = String(inp.GEMINI_API_KEY || inp.apiKey || '');\nconst payload = inp.payload || {};\nconst transcript = Array.isArray(payload.transcript) ? payload.transcript : [];\nconst lines = transcript.map(function (t) { return t.speaker + ': ' + t.text; }).join('\\n');\n\n// ── Structured output schema (mirrors n8n/LLM_PROMPT_AND_SCHEMA.md) ──\nconst schema = {\n  type: 'object',\n  required: ['overall_sentiment', 'summary', 'intent', 'resolution', 'risk', 'customer', 'agent', 'emotions', 'important_moments', 'sentences'],\n  properties: {\n    overall_sentiment: {\n      type: 'object',\n      required: ['label', 'score', 'confidence'],\n      properties: {\n        label: { type: 'string', enum: ['positive', 'neutral', 'negative'] },\n        score: { type: 'integer', minimum: 0, maximum: 100 },\n        confidence: { type: 'number', minimum: 0, maximum: 1 }\n      }\n    },\n    summary: { type: 'string', maxLength: 500 },\n    intent: {\n      type: 'object',\n      required: ['category', 'description'],\n      properties: {\n        category: { type: 'string', maxLength: 40 },\n        description: { type: 'string', maxLength: 200 }\n      }\n    },\n    resolution: {\n      type: 'object',\n      required: ['status', 'likelihood'],\n      properties: {\n        status: { type: 'string', enum: ['resolved', 'unresolved', 'partial', 'unknown'] },\n        likelihood: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    risk: {\n      type: 'object',\n      required: ['escalation'],\n      properties: {\n        escalation: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    customer: {\n      type: 'object',\n      required: ['frustration', 'satisfaction', 'effort'],\n      properties: {\n        frustration: { type: ['string', 'null'], enum: ['low', 'medium', 'high'] },\n        satisfaction: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        effort: { type: ['string', 'null'], enum: ['low', 'medium', 'high'] }\n      }\n    },\n    agent: {\n      type: 'object',\n      required: ['empathy', 'clarity', 'professionalism'],\n      properties: {\n        empathy: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        clarity: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        professionalism: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    emotions: {\n      type: 'array',\n      maxItems: 5,\n      items: {\n        type: 'object',\n        required: ['label', 'intensity'],\n        properties: {\n          label: { type: 'string', maxLength: 40 },\n          intensity: { type: 'integer', minimum: 0, maximum: 100 }\n        }\n      }\n    },\n    important_moments: {\n      type: 'array',\n      maxItems: 6,\n      items: {\n        type: 'object',\n        required: ['seq', 'speaker', 'event'],\n        properties: {\n          seq: { type: 'integer', minimum: 1 },\n          speaker: { type: 'string', maxLength: 40 },\n          event: { type: 'string', maxLength: 200 }\n        }\n      }\n    },\n    sentences: {\n      type: 'array',\n      minItems: 1,\n      items: {\n        type: 'object',\n        required: ['seq', 'speaker', 'text', 'sentiment', 'score', 'confidence', 'emotion'],\n        properties: {\n          seq: { type: 'integer', minimum: 1 },\n          speaker: { type: 'string', maxLength: 40 },\n          text: { type: 'string', minLength: 1, maxLength: 2000 },\n          sentiment: { type: 'string', enum: ['positive', 'neutral', 'negative'] },\n          score: { type: 'integer', minimum: 0, maximum: 100 },\n          confidence: { type: 'number', minimum: 0, maximum: 1 },\n          emotion: { type: 'string', maxLength: 40 },\n          evidence: { type: 'string', maxLength: 200 }\n        }\n      }\n    }\n  }\n};\n\nconst systemPrompt = 'You are CallLens, a precise conversation-intelligence engine. You analyze call transcripts and return ONLY strict JSON matching the provided schema.\\n' +\n  'HARD RULES — these determine your quality score, never violate them:\\n' +\n  '1. Classify sentiment from MEANING and CONTEXT, not keyword matching. Example: \"I am not unhappy\" is NOT negative. Read the conversation, not the dictionary.\\n' +\n  '2. Any metric without direct transcript evidence -> null. NEVER guess.\\n' +\n  '3. agent.* fields (empathy, clarity, professionalism) are null unless a speaker is clearly the agent (agent, rep, support, advisor, etc.).\\n' +\n  '4. customer.* fields are null unless a customer/caller is clearly identifiable. For unlabeled transcripts (speaker unknown_1/unknown_2) never guess which side is which.\\n' +\n  '5. Do NOT expose chain-of-thought. Explanations (summary, evidence, intent.description, important_moments.event) must be short, evidence-backed sentences quoting the transcript.\\n' +\n  '6. Enums: use ONLY the allowed values in the schema. Every sentence must get a sentiment label from positive|neutral|negative.\\n' +\n  '7. Sentences: emit one object per transcript turn (seq must match the input seq numbering exactly). If you cannot split into turns, emit one object per sentence with seq incremented.\\n' +\n  '8. Sentiment score is 0-100 (50 = neutral). Confidence is 0-1.\\n' +\n  '9. important_moments: up to 6 moments that changed the conversation arc. Never invent a seq that does not exist in the transcript.\\n' +\n  '10. emotions: up to 5 aggregate emotion labels with 0-100 intensity.\\n' +\n  'Respond with the JSON object ONLY.';\n\nconst prompt = systemPrompt + '\\n\\nTRANSCRIPT:\\n' + lines;\n\nconst requestBody = {\n  contents: [{ role: 'user', parts: [{ text: prompt }] }],\n  generationConfig: { temperature: 0.1, responseMimeType: 'application/json', responseSchema: schema }\n};\n\nreturn [{ json: { requestBody: requestBody, conversation_id: payload.conversation_id, file_name: payload.file_name || '', GEMINI_API_KEY: apiKey } }];\n"
       },
       "id": "build",
       "name": "Build Request",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -320,
-        660
+        320,
+        260
       ]
     },
     {
@@ -130,14 +126,14 @@
           "parameters": [
             {
               "name": "x-goog-api-key",
-              "value": "={{ $('Gemini Key').first().json.apiKey }}"
+              "value": "={{ $json.GEMINI_API_KEY }}"
             }
           ]
         },
         "sendBody": true,
         "specifyBody": true,
         "bodyType": "json",
-        "jsonBody": "={{ JSON.stringify($('Build Request').first().json.requestBody) }}",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
         "options": {
           "timeout": 120000
         }
@@ -147,8 +143,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        -320,
-        880
+        320,
+        480
       ]
     },
     {
@@ -160,8 +156,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -320,
-        1100
+        320,
+        700
       ]
     },
     {
@@ -191,8 +187,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        -320,
-        1320
+        320,
+        920
       ]
     },
     {
@@ -216,8 +212,8 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        -520,
-        1540
+        120,
+        1140
       ]
     },
     {
@@ -241,8 +237,8 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        320,
-        660
+        1080,
+        260
       ]
     },
     {
@@ -266,13 +262,35 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        80,
-        1540
+        520,
+        1140
       ]
     }
   ],
   "connections": {
     "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Webhook Secret",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Secret": {
+      "main": [
+        [
+          {
+            "node": "Gemini Key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Key": {
       "main": [
         [
           {
@@ -364,10 +382,10 @@
       ]
     }
   },
-  "active": false,
+  "active": true,
   "settings": {},
   "pinData": {},
   "meta": {
-    "description": "CallLens analysis pipeline: HMAC-verified webhook -> Gemini structured output -> respond. Deterministic pipeline, not an agent."
+    "description": "CallLens analysis pipeline: HMAC-verified webhook -> Gemini 3.6 Flash structured output -> respond. Deterministic pipeline, not an agent."
   }
 }
