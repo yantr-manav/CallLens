@@ -39,6 +39,10 @@ services:
       - N8N_SECURE_COOKIE=true
       # Allow the Code node to use the built-in 'crypto' module (HMAC verification).
       - NODE_FUNCTION_ALLOW_BUILTIN=crypto
+      # Shared CallLens secrets (mirror the app .env — every secret lives in
+      # one place: infra/.env).
+      - CALLLENS_WEBHOOK_SECRET=${CALLLENS_WEBHOOK_SECRET}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
     volumes:
       - n8n_data:/home/node/.n8n
     ports:

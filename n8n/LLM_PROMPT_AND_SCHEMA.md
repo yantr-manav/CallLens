@@ -7,12 +7,17 @@ boundary — see build plan §3, §8.4).
 
 ## Model
 
-`gemini-2.0-flash` (Google AI Studio, free tier) with:
+`gemini-3.6-flash` (Google AI Studio, free tier) with:
 
 - `responseMimeType: "application/json"` (Gemini structured output)
 - `responseSchema`: the JSON schema below (enum-restricted, nullable where
   evidence may be absent)
 - `temperature: 0.1`
+
+> The model ID is set in `scripts/build-n8n-workflow.mjs` (single constant in
+> the Gemini node URL). Swap to `gemini-3.7-flash`, `gemini-3.5-flash` or
+> `gemini-3-flash` by editing that URL and re-running the generator, then
+> re-importing the JSON in n8n.
 
 ## System prompt (verbatim)
 
