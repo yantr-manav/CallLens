@@ -4,7 +4,6 @@ services:
     env: docker
     plan: free
     rootDir: infra/render
-    healthCheckPath: /healthz
     envVars:
       - key: N8N_HOST
         sync: false
