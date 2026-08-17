@@ -77,17 +77,20 @@ re-billed).
 1. Create a project; run `supabase/migrations/0001_init.sql` (tables, RLS,
    storage bucket, and the trigger that auto-creates a `profiles` row for every
    new sign-up).
-2. Authentication → Providers → Email: **disable "Confirm email"** so new
-   accounts can sign in immediately (or keep it on — the app shows a
-   "check your email" screen).
+2. **Authentication → Providers → Email: ENABLE "Email"** (required for both
+   sign-up and sign-in). Optionally disable "Confirm email" so new accounts
+   sign in immediately without an email round-trip.
 3. Copy `.env.example` → `.env.local`, fill `NEXT_PUBLIC_SUPABASE_URL`,
    `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`.
 
-### 2. n8n Cloud + Groq (fast — fits Vercel Hobby's 10s cap)
+### 2. n8n Cloud + Groq (async — fits Vercel Hobby's 10s cap)
 
 Gemini takes 8–15s and trips Vercel Hobby's 10s function limit. The pipeline
-uses **Groq** (`llama-3.3-70b-versatile`, ~1–3s) instead, which keeps the whole
-round-trip well inside the cap. Get a free key at https://console.groq.com/keys.
+uses **Groq** (`llama-3.3-70b-versatile`, ~1–3s) **and runs asynchronously**:
+the app POSTs to n8n, gets a `202 Accepted` immediately, and n8n calls back to
+`/api/analyze/callback` with the result when Groq finishes. So the request
+stays well under the cap — no Pro upgrade required. Get a free Groq key at
+https://console.groq.com/keys.
 
 1. Create a free n8n Cloud instance (`<your-sub>.app.n8n.cloud`).
 2. **Import the workflow** — either:
@@ -96,10 +99,9 @@ round-trip well inside the cap. Get a free key at https://console.groq.com/keys.
      `N8N_WEBHOOK_SECRET`) and `GROQ_API_KEY` (your Groq key); or
    - run `node scripts/build-n8n-workflow.mjs` with `GROQ_API_KEY` exported to
      bake the key straight into the generated file, then import.
-3. Activate the workflow (toggle). Test:
-   `curl -X POST https://<your-sub>.app.n8n.cloud/webhook/calllens-analyze -H "Content-Type: application/json" -d '{}'`
-   → expect a 401-style rejection (proves it's live), and a valid analysis JSON
-   with a correctly HMAC-signed request.
+3. Activate the workflow (toggle). The app sends its own public URL in the
+   signed payload, so n8n knows where to call the callback — no `APP_URL` config
+   needed. The callback is authenticated by the same `N8N_WEBHOOK_SECRET`.
 4. In `.env.local`: `N8N_WEBHOOK_URL=https://<your-sub>.app.n8n.cloud/webhook/calllens-analyze`
    and `N8N_WEBHOOK_SECRET=<exact same secret as in the Config node>`.
 

@@ -1,0 +1,11 @@
+Agent: Thank you for calling BrightWave Support, this is Marcus. How can I help you today?
+Customer: Hi Marcus, I'm looking at my invoice and I think I've been double charged for the premium plan.
+Agent: I'm sorry to hear that. Let me pull up your account. Can I get the email on the file, please?
+Customer: Sure, it's daniel.foster@fastmail.com.
+Agent: Thanks Daniel. I can see two charges on the 3rd — one for the monthly plan and one labeled "setup". The setup fee is a one-time charge, not a double bill.
+Customer: Oh, I see. But the setup fee wasn't mentioned when I signed up. That feels misleading.
+Agent: I understand the frustration. The setup fee is listed in the terms you accepted at checkout. That said, I can apply a one-time courtesy credit to offset it. Would that help?
+Customer: Yeah, that would be fair. Can you do that now?
+Agent: Absolutely. I've applied a credit for the full setup amount and it'll show on your next statement. Anything else I can help with?
+Customer: No, that's everything. Thanks for sorting it out.
+Agent: You're welcome, Daniel. Have a great day.

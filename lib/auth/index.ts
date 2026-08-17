@@ -59,7 +59,17 @@ export async function signInUser(
       email: cleanEmail,
       password,
     });
-    if (error) return { ok: false, error: 'Invalid email or password.' };
+    if (error) {
+      const m = error.message.toLowerCase();
+      if (m.includes('disabled') || m.includes('provider')) {
+        return {
+          ok: false,
+          error:
+            'Email sign-in is disabled in your Supabase project. Enable Authentication → Providers → Email.',
+        };
+      }
+      return { ok: false, error: 'Invalid email or password.' };
+    }
     return { ok: true };
   }
 
@@ -106,6 +116,13 @@ export async function signUpUser(
       }
       if (msg.includes('password')) {
         return { ok: false, error: 'Password must be at least 8 characters.' };
+      }
+      if (msg.includes('disabled') || msg.includes('provider')) {
+        return {
+          ok: false,
+          error:
+            'Email sign-in is disabled in your Supabase project. Enable Authentication → Providers → Email.',
+        };
       }
       if (
         msg.includes('email') ||

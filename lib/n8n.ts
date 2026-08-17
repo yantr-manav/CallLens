@@ -20,6 +20,12 @@ export interface N8nResponse {
   code?: 'unreachable' | 'invalid_output' | 'timeout' | 'rejected' | 'unknown';
 }
 
+export interface DispatchResult {
+  accepted: boolean;
+  code?: 'unreachable' | 'invalid_output' | 'timeout' | 'rejected' | 'unknown';
+  error?: string;
+}
+
 async function hmac(body: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     'raw',
@@ -123,6 +129,86 @@ export async function callN8nAnalysis(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// ── Async dispatch ──
+// Fires the analysis job at n8n and returns as soon as n8n *accepts* it (after
+// HMAC verification). The heavy Groq call then runs in the background and n8n
+// calls /api/analyze/callback when done — so this stays well under serverless
+// function limits (works on Vercel Hobby's 10s cap). We never await the LLM
+// result here.
+export async function dispatchN8nAnalysis(
+  payload: AnalyzePayload,
+  opts: { timeoutMs?: number } = {}
+): Promise<DispatchResult> {
+  if (!mode.n8nConfigured) {
+    return { accepted: false, code: 'unreachable', error: 'n8n is not configured.' };
+  }
+
+  const body = JSON.stringify(payload);
+  const signature = await hmac(body);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15_000);
+
+  try {
+    const res = await fetch(env.n8nWebhookUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Signature': signature,
+      },
+      body,
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (res.status === 401 || res.status === 403) {
+      return { accepted: false, code: 'rejected', error: 'Webhook signature rejected.' };
+    }
+    if (!res.ok) {
+      return {
+        accepted: false,
+        code: 'unreachable',
+        error: `n8n responded ${res.status}`,
+      };
+    }
+    // n8n Cloud wraps non-2xx Respond nodes as HTTP 200 with the error in the
+    // body — so a 200 can mean "rejected". The async accept body carries
+    // { accepted: true, jobId }, while a rejection carries { error: "..." }.
+    const text = await res.text();
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      typeof (parsed as { error?: unknown }).error === 'string' &&
+      (parsed as { accepted?: unknown }).accepted !== true
+    ) {
+      const err = (parsed as { error: string }).error;
+      return {
+        accepted: false,
+        code: err.toLowerCase().includes('signature') ? 'rejected' : 'unreachable',
+        error: err,
+      };
+    }
+    // 200/202 with { accepted: true } = job accepted; result arrives via the
+    // async callback.
+    return { accepted: true };
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err instanceof Error && err.name === 'AbortError') {
+      return { accepted: false, code: 'timeout', error: 'n8n did not accept the job in time.' };
+    }
+    return {
+      accepted: false,
+      code: 'unreachable',
+      error: err instanceof Error ? err.message : 'unknown fetch error',
+    };
+  }
 }
 
 // ── v1 normalization ──

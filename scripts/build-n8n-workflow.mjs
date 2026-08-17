@@ -182,7 +182,15 @@ const requestBody = {
   response_format: { type: 'json_object' }
 };
 
-return [{ json: { requestBody: requestBody, conversation_id: payload.conversation_id, file_name: payload.file_name || '', GROQ_API_KEY: apiKey } }];
+// The app sends its public origin (app_url) inside the signed payload; n8n
+// calls that origin's async callback when Groq is done. This avoids hardcoding
+// the app URL in n8n.
+const appUrl = String(inp.app_url || '').replace(/\\/$/, '');
+const callbackUrl = appUrl ? appUrl + '/api/analyze/callback' : '';
+
+// Carry the whole input forward so secrets + callbackUrl reach the callback
+// HTTP node after validation.
+return [{ json: { ...inp, requestBody: requestBody, conversation_id: payload.conversation_id, file_name: payload.file_name || '', GROQ_API_KEY: apiKey, callbackUrl: callbackUrl } }];
 `;
 
 const groqCallCode = `
@@ -240,7 +248,9 @@ try {
 } catch (e) {
   ok = false;
 }
-return [{ json: { ok: ok, result: result, conversation_id: $('Build Request').first().json.conversation_id } }];
+// Spread the input forward so callbackUrl + N8N_WEBHOOK_SECRET survive to the
+// callback HTTP node.
+return [{ json: { ...inp, ok: ok, result: result } }];
 `;
 
 const uid = (s) => s;
@@ -343,21 +353,23 @@ const nodes = [
     position: [320, 920],
   },
   {
+    // Respond-and-continue: the webhook returns 202 the moment the signature
+    // checks out, then the workflow keeps running Groq in the background.
     parameters: {
       respondWith: 'json',
-      responseBody: "={{ JSON.stringify($('Validate Output').first().json.result) }}",
-      responseCode: 200,
+      responseBody: "={{ JSON.stringify({ accepted: true, jobId: $json.conversation_id }) }}",
+      responseCode: 202,
       options: {
         responseHeaders: {
           entries: [{ name: 'Content-Type', value: 'application/json' }],
         },
       },
     },
-    id: uid('r200'),
-    name: 'Respond 200',
+    id: uid('r202'),
+    name: 'Respond 202',
     type: 'n8n-nodes-base.respondToWebhook',
     typeVersion: 1.1,
-    position: [120, 1140],
+    position: [880, 260],
   },
   {
     parameters: {
@@ -376,21 +388,55 @@ const nodes = [
     typeVersion: 1.1,
     position: [1080, 260],
   },
+  // ── Async callbacks: n8n POSTs the result (or failure) back to the app,
+  // which persists it and flips the job status. Authenticated by the shared
+  // secret header x-calllens-callback. ──
   {
     parameters: {
-      respondWith: 'text',
-      responseBody: '{"error":"The analysis returned an unexpected result. Please retry."}',
-      responseCode: 502,
-      options: {
-        responseHeaders: {
-          entries: [{ name: 'Content-Type', value: 'application/json' }],
-        },
+      url: '={{ $json.callbackUrl }}',
+      method: 'POST',
+      sendHeaders: true,
+      headerParameters: {
+        parameters: [
+          { name: 'Content-Type', value: 'application/json' },
+          { name: 'x-calllens-callback', value: '={{ $json.N8N_WEBHOOK_SECRET }}' },
+        ],
       },
+      sendBody: true,
+      contentType: 'json',
+      specifyBody: 'json',
+      jsonBody:
+        '={{ JSON.stringify({ jobId: $json.conversation_id, result: $json.result }) }}',
+      options: {},
     },
-    id: uid('r502'),
-    name: 'Respond 502',
-    type: 'n8n-nodes-base.respondToWebhook',
-    typeVersion: 1.1,
+    id: uid('cbOk'),
+    name: 'Callback (success)',
+    type: 'n8n-nodes-base.httpRequest',
+    typeVersion: 4.2,
+    position: [120, 1140],
+  },
+  {
+    parameters: {
+      url: '={{ $json.callbackUrl }}',
+      method: 'POST',
+      sendHeaders: true,
+      headerParameters: {
+        parameters: [
+          { name: 'Content-Type', value: 'application/json' },
+          { name: 'x-calllens-callback', value: '={{ $json.N8N_WEBHOOK_SECRET }}' },
+        ],
+      },
+      sendBody: true,
+      contentType: 'json',
+      specifyBody: 'json',
+      jsonBody:
+        '={{ JSON.stringify({ jobId: $json.conversation_id, error: "invalid_output" }) }}',
+      options: {},
+    },
+    id: uid('cbErr'),
+    name: 'Callback (error)',
+    type: 'n8n-nodes-base.httpRequest',
+    typeVersion: 4.2,
     position: [520, 1140],
   },
 ];
@@ -403,10 +449,12 @@ const connections = {
   },
   'Valid Signature?': {
     main: [
-      [{ node: 'Build Request', type: 'main', index: 0 }],
+      [{ node: 'Respond 202', type: 'main', index: 0 }],
       [{ node: 'Respond 401', type: 'main', index: 0 }],
     ],
   },
+  // After the 202 is sent, the workflow keeps going in the background.
+  'Respond 202': { main: [[{ node: 'Build Request', type: 'main', index: 0 }]] },
   'Build Request': { main: [[{ node: 'Call Groq', type: 'main', index: 0 }]] },
   'Call Groq': { main: [[{ node: 'Validate Output', type: 'main', index: 0 }]] },
   'Validate Output': {
@@ -414,8 +462,8 @@ const connections = {
   },
   'Output Valid?': {
     main: [
-      [{ node: 'Respond 200', type: 'main', index: 0 }],
-      [{ node: 'Respond 502', type: 'main', index: 0 }],
+      [{ node: 'Callback (success)', type: 'main', index: 0 }],
+      [{ node: 'Callback (error)', type: 'main', index: 0 }],
     ],
   },
 };
@@ -431,7 +479,7 @@ const workflow = {
   pinData: {},
   meta: {
     description:
-      'CallLens analysis pipeline: HMAC-verified webhook -> Groq (llama-3.3-70b) structured JSON -> respond. Fast (~1-3s) so it fits Vercel Hobby\'s 10s function cap. Deterministic pipeline, not an agent.',
+      'CallLens async analysis pipeline: HMAC-verified webhook -> 202 accept -> Groq (llama-3.3-70b) in the background -> callback to the app with the result. Fits Vercel Hobby\'s 10s function cap. Deterministic pipeline, not an agent.',
   },
 };
 

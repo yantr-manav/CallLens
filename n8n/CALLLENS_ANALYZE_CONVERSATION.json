@@ -77,7 +77,7 @@
     },
     {
       "parameters": {
-        "jsCode": "\nconst inp = $input.first().json || {};\nconst apiKey = String(inp.GROQ_API_KEY || inp.apiKey || '');\nconst payload = inp.payload || inp.body || {};\nconst transcript = Array.isArray(payload.transcript) ? payload.transcript : [];\nconst lines = transcript.map(function (t) { return t.speaker + ': ' + t.text; }).join('\\n');\n\n// ── Structured output schema (mirrors n8n/LLM_PROMPT_AND_SCHEMA.md) ──\nconst schema = {\n  type: 'object',\n  required: ['overall_sentiment', 'summary', 'intent', 'resolution', 'risk', 'customer', 'agent', 'emotions', 'important_moments', 'sentences'],\n  properties: {\n    overall_sentiment: {\n      type: 'object',\n      required: ['label', 'score', 'confidence'],\n      properties: {\n        label: { type: 'string', enum: ['positive', 'neutral', 'negative'] },\n        score: { type: 'integer', minimum: 0, maximum: 100 },\n        confidence: { type: 'number', minimum: 0, maximum: 1 }\n      }\n    },\n    summary: { type: 'string', maxLength: 500 },\n    intent: {\n      type: 'object',\n      required: ['category', 'description'],\n      properties: {\n        category: { type: 'string', maxLength: 40 },\n        description: { type: 'string', maxLength: 200 }\n      }\n    },\n    resolution: {\n      type: 'object',\n      required: ['status', 'likelihood'],\n      properties: {\n        status: { type: 'string', enum: ['resolved', 'unresolved', 'partial', 'unknown'] },\n        likelihood: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    risk: {\n      type: 'object',\n      required: ['escalation'],\n      properties: {\n        escalation: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    customer: {\n      type: 'object',\n      required: ['frustration', 'satisfaction', 'effort'],\n      properties: {\n        frustration: { type: ['string', 'null'], enum: ['low', 'medium', 'high'] },\n        satisfaction: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        effort: { type: ['string', 'null'], enum: ['low', 'medium', 'high'] }\n      }\n    },\n    agent: {\n      type: 'object',\n      required: ['empathy', 'clarity', 'professionalism'],\n      properties: {\n        empathy: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        clarity: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        professionalism: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    emotions: {\n      type: 'array',\n      maxItems: 5,\n      items: {\n        type: 'object',\n        required: ['label', 'intensity'],\n        properties: {\n          label: { type: 'string', maxLength: 40 },\n          intensity: { type: 'integer', minimum: 0, maximum: 100 }\n        }\n      }\n    },\n    important_moments: {\n      type: 'array',\n      maxItems: 6,\n      items: {\n        type: 'object',\n        required: ['seq', 'speaker', 'event'],\n        properties: {\n          seq: { type: 'integer', minimum: 1 },\n          speaker: { type: 'string', maxLength: 40 },\n          event: { type: 'string', maxLength: 200 }\n        }\n      }\n    },\n    sentences: {\n      type: 'array',\n      minItems: 1,\n      items: {\n        type: 'object',\n        required: ['seq', 'speaker', 'text', 'sentiment', 'score', 'confidence', 'emotion'],\n        properties: {\n          seq: { type: 'integer', minimum: 1 },\n          speaker: { type: 'string', maxLength: 40 },\n          text: { type: 'string', minLength: 1, maxLength: 2000 },\n          sentiment: { type: 'string', enum: ['positive', 'neutral', 'negative'] },\n          score: { type: 'integer', minimum: 0, maximum: 100 },\n          confidence: { type: 'number', minimum: 0, maximum: 1 },\n          emotion: { type: 'string', maxLength: 40 },\n          evidence: { type: 'string', maxLength: 200 }\n        }\n      }\n    }\n  }\n};\n\nconst systemPrompt = 'You are CallLens, a precise conversation-intelligence engine. You analyze call transcripts and return ONLY strict JSON matching the provided schema.\\n' +\n  'HARD RULES — these determine your quality score, never violate them:\\n' +\n  '1. Classify sentiment from MEANING and CONTEXT, not keyword matching. Example: \"I am not unhappy\" is NOT negative. Read the conversation, not the dictionary.\\n' +\n  '2. Any metric without direct transcript evidence -> null. NEVER guess.\\n' +\n  '3. agent.* fields (empathy, clarity, professionalism) are null unless a speaker is clearly the agent (agent, rep, support, advisor, etc.).\\n' +\n  '4. customer.* fields are null unless a customer/caller is clearly identifiable. For unlabeled transcripts (speaker unknown_1/unknown_2) never guess which side is which.\\n' +\n  '5. Do NOT expose chain-of-thought. Explanations (summary, evidence, intent.description, important_moments.event) must be short, evidence-backed sentences quoting the transcript.\\n' +\n  '6. Enums: use ONLY the allowed values in the schema. Every sentence must get a sentiment label from positive|neutral|negative.\\n' +\n  '7. Sentences: emit one object per transcript turn (seq must match the input seq numbering exactly). If you cannot split into turns, emit one object per sentence with seq incremented.\\n' +\n  '8. Sentiment score is 0-100 (50 = neutral). Confidence is 0-1.\\n' +\n  '9. important_moments: up to 6 moments that changed the conversation arc. Never invent a seq that does not exist in the transcript.\\n' +\n  '10. emotions: up to 5 aggregate emotion labels with 0-100 intensity.\\n' +\n  'Respond with the JSON object ONLY.';\n\nconst prompt = systemPrompt + '\\n\\nTRANSCRIPT:\\n' + lines;\n\n// Groq is OpenAI-compatible and returns in ~1-3s (vs 8-15s for Gemini), which\n// keeps the whole call inside Vercel Hobby's 10s function cap. It does NOT\n// support a JSON responseSchema, so the schema lives in the system prompt and\n// the app re-validates the shape with Zod.\nconst requestBody = {\n  model: 'llama-3.3-70b-versatile',\n  messages: [\n    { role: 'system', content: systemPrompt },\n    { role: 'user', content: lines }\n  ],\n  temperature: 0.1,\n  response_format: { type: 'json_object' }\n};\n\nreturn [{ json: { requestBody: requestBody, conversation_id: payload.conversation_id, file_name: payload.file_name || '', GROQ_API_KEY: apiKey } }];\n"
+        "jsCode": "\nconst inp = $input.first().json || {};\nconst apiKey = String(inp.GROQ_API_KEY || inp.apiKey || '');\nconst payload = inp.payload || inp.body || {};\nconst transcript = Array.isArray(payload.transcript) ? payload.transcript : [];\nconst lines = transcript.map(function (t) { return t.speaker + ': ' + t.text; }).join('\\n');\n\n// ── Structured output schema (mirrors n8n/LLM_PROMPT_AND_SCHEMA.md) ──\nconst schema = {\n  type: 'object',\n  required: ['overall_sentiment', 'summary', 'intent', 'resolution', 'risk', 'customer', 'agent', 'emotions', 'important_moments', 'sentences'],\n  properties: {\n    overall_sentiment: {\n      type: 'object',\n      required: ['label', 'score', 'confidence'],\n      properties: {\n        label: { type: 'string', enum: ['positive', 'neutral', 'negative'] },\n        score: { type: 'integer', minimum: 0, maximum: 100 },\n        confidence: { type: 'number', minimum: 0, maximum: 1 }\n      }\n    },\n    summary: { type: 'string', maxLength: 500 },\n    intent: {\n      type: 'object',\n      required: ['category', 'description'],\n      properties: {\n        category: { type: 'string', maxLength: 40 },\n        description: { type: 'string', maxLength: 200 }\n      }\n    },\n    resolution: {\n      type: 'object',\n      required: ['status', 'likelihood'],\n      properties: {\n        status: { type: 'string', enum: ['resolved', 'unresolved', 'partial', 'unknown'] },\n        likelihood: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    risk: {\n      type: 'object',\n      required: ['escalation'],\n      properties: {\n        escalation: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    customer: {\n      type: 'object',\n      required: ['frustration', 'satisfaction', 'effort'],\n      properties: {\n        frustration: { type: ['string', 'null'], enum: ['low', 'medium', 'high'] },\n        satisfaction: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        effort: { type: ['string', 'null'], enum: ['low', 'medium', 'high'] }\n      }\n    },\n    agent: {\n      type: 'object',\n      required: ['empathy', 'clarity', 'professionalism'],\n      properties: {\n        empathy: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        clarity: { type: ['integer', 'null'], minimum: 0, maximum: 100 },\n        professionalism: { type: ['integer', 'null'], minimum: 0, maximum: 100 }\n      }\n    },\n    emotions: {\n      type: 'array',\n      maxItems: 5,\n      items: {\n        type: 'object',\n        required: ['label', 'intensity'],\n        properties: {\n          label: { type: 'string', maxLength: 40 },\n          intensity: { type: 'integer', minimum: 0, maximum: 100 }\n        }\n      }\n    },\n    important_moments: {\n      type: 'array',\n      maxItems: 6,\n      items: {\n        type: 'object',\n        required: ['seq', 'speaker', 'event'],\n        properties: {\n          seq: { type: 'integer', minimum: 1 },\n          speaker: { type: 'string', maxLength: 40 },\n          event: { type: 'string', maxLength: 200 }\n        }\n      }\n    },\n    sentences: {\n      type: 'array',\n      minItems: 1,\n      items: {\n        type: 'object',\n        required: ['seq', 'speaker', 'text', 'sentiment', 'score', 'confidence', 'emotion'],\n        properties: {\n          seq: { type: 'integer', minimum: 1 },\n          speaker: { type: 'string', maxLength: 40 },\n          text: { type: 'string', minLength: 1, maxLength: 2000 },\n          sentiment: { type: 'string', enum: ['positive', 'neutral', 'negative'] },\n          score: { type: 'integer', minimum: 0, maximum: 100 },\n          confidence: { type: 'number', minimum: 0, maximum: 1 },\n          emotion: { type: 'string', maxLength: 40 },\n          evidence: { type: 'string', maxLength: 200 }\n        }\n      }\n    }\n  }\n};\n\nconst systemPrompt = 'You are CallLens, a precise conversation-intelligence engine. You analyze call transcripts and return ONLY strict JSON matching the provided schema.\\n' +\n  'HARD RULES — these determine your quality score, never violate them:\\n' +\n  '1. Classify sentiment from MEANING and CONTEXT, not keyword matching. Example: \"I am not unhappy\" is NOT negative. Read the conversation, not the dictionary.\\n' +\n  '2. Any metric without direct transcript evidence -> null. NEVER guess.\\n' +\n  '3. agent.* fields (empathy, clarity, professionalism) are null unless a speaker is clearly the agent (agent, rep, support, advisor, etc.).\\n' +\n  '4. customer.* fields are null unless a customer/caller is clearly identifiable. For unlabeled transcripts (speaker unknown_1/unknown_2) never guess which side is which.\\n' +\n  '5. Do NOT expose chain-of-thought. Explanations (summary, evidence, intent.description, important_moments.event) must be short, evidence-backed sentences quoting the transcript.\\n' +\n  '6. Enums: use ONLY the allowed values in the schema. Every sentence must get a sentiment label from positive|neutral|negative.\\n' +\n  '7. Sentences: emit one object per transcript turn (seq must match the input seq numbering exactly). If you cannot split into turns, emit one object per sentence with seq incremented.\\n' +\n  '8. Sentiment score is 0-100 (50 = neutral). Confidence is 0-1.\\n' +\n  '9. important_moments: up to 6 moments that changed the conversation arc. Never invent a seq that does not exist in the transcript.\\n' +\n  '10. emotions: up to 5 aggregate emotion labels with 0-100 intensity.\\n' +\n  'Respond with the JSON object ONLY.';\n\nconst prompt = systemPrompt + '\\n\\nTRANSCRIPT:\\n' + lines;\n\n// Groq is OpenAI-compatible and returns in ~1-3s (vs 8-15s for Gemini), which\n// keeps the whole call inside Vercel Hobby's 10s function cap. It does NOT\n// support a JSON responseSchema, so the schema lives in the system prompt and\n// the app re-validates the shape with Zod.\nconst requestBody = {\n  model: 'llama-3.3-70b-versatile',\n  messages: [\n    { role: 'system', content: systemPrompt },\n    { role: 'user', content: lines }\n  ],\n  temperature: 0.1,\n  response_format: { type: 'json_object' }\n};\n\n// The app sends its public origin (app_url) inside the signed payload; n8n\n// calls that origin's async callback when Groq is done. This avoids hardcoding\n// the app URL in n8n.\nconst appUrl = String(inp.app_url || '').replace(/\\/$/, '');\nconst callbackUrl = appUrl ? appUrl + '/api/analyze/callback' : '';\n\n// Carry the whole input forward so secrets + callbackUrl reach the callback\n// HTTP node after validation.\nreturn [{ json: { ...inp, requestBody: requestBody, conversation_id: payload.conversation_id, file_name: payload.file_name || '', GROQ_API_KEY: apiKey, callbackUrl: callbackUrl } }];\n"
       },
       "id": "build",
       "name": "Build Request",
@@ -103,7 +103,7 @@
     },
     {
       "parameters": {
-        "jsCode": "\n// Extract the JSON text from the Groq chat-completion response and parse it.\n// Routing to a 200 vs 502 response happens in the \"Output Valid?\" IF node.\nconst item = $input.first().json;\nconst data = (item && item.groqResponse) || {};\nconst choices = data.choices || [];\nconst msg = (choices[0] && choices[0].message) || {};\nlet text = typeof msg.content === 'string' ? msg.content : '';\n// Groq may (rarely) wrap JSON in markdown fences — strip them before parsing.\nlet cleaned = text.trim();\nif (cleaned.startsWith('```')) {\n  cleaned = cleaned.replace(/^```(?:json)?s*/i, '').replace(/s*```$/, '');\n}\nlet result = null;\nlet ok = false;\ntry {\n  result = JSON.parse(cleaned);\n  ok = true;\n} catch (e) {\n  ok = false;\n}\nreturn [{ json: { ok: ok, result: result, conversation_id: $('Build Request').first().json.conversation_id } }];\n"
+        "jsCode": "\n// Extract the JSON text from the Groq chat-completion response and parse it.\n// Routing to a 200 vs 502 response happens in the \"Output Valid?\" IF node.\nconst item = $input.first().json;\nconst data = (item && item.groqResponse) || {};\nconst choices = data.choices || [];\nconst msg = (choices[0] && choices[0].message) || {};\nlet text = typeof msg.content === 'string' ? msg.content : '';\n// Groq may (rarely) wrap JSON in markdown fences — strip them before parsing.\nlet cleaned = text.trim();\nif (cleaned.startsWith('```')) {\n  cleaned = cleaned.replace(/^```(?:json)?s*/i, '').replace(/s*```$/, '');\n}\nlet result = null;\nlet ok = false;\ntry {\n  result = JSON.parse(cleaned);\n  ok = true;\n} catch (e) {\n  ok = false;\n}\n// Spread the input forward so callbackUrl + N8N_WEBHOOK_SECRET survive to the\n// callback HTTP node.\nreturn [{ json: { ...inp, ok: ok, result: result } }];\n"
       },
       "id": "validate",
       "name": "Validate Output",
@@ -148,8 +148,8 @@
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ JSON.stringify($('Validate Output').first().json.result) }}",
-        "responseCode": 200,
+        "responseBody": "={{ JSON.stringify({ accepted: true, jobId: $json.conversation_id }) }}",
+        "responseCode": 202,
         "options": {
           "responseHeaders": {
             "entries": [
@@ -161,13 +161,13 @@
           }
         }
       },
-      "id": "r200",
-      "name": "Respond 200",
+      "id": "r202",
+      "name": "Respond 202",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        120,
-        1140
+        880,
+        260
       ]
     },
     {
@@ -197,24 +197,63 @@
     },
     {
       "parameters": {
-        "respondWith": "text",
-        "responseBody": "{\"error\":\"The analysis returned an unexpected result. Please retry.\"}",
-        "responseCode": 502,
-        "options": {
-          "responseHeaders": {
-            "entries": [
-              {
-                "name": "Content-Type",
-                "value": "application/json"
-              }
-            ]
-          }
-        }
+        "url": "={{ $json.callbackUrl }}",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "x-calllens-callback",
+              "value": "={{ $json.N8N_WEBHOOK_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jobId: $json.conversation_id, result: $json.result }) }}",
+        "options": {}
       },
-      "id": "r502",
-      "name": "Respond 502",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.1,
+      "id": "cbOk",
+      "name": "Callback (success)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        120,
+        1140
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.callbackUrl }}",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "x-calllens-callback",
+              "value": "={{ $json.N8N_WEBHOOK_SECRET }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jobId: $json.conversation_id, error: \"invalid_output\" }) }}",
+        "options": {}
+      },
+      "id": "cbErr",
+      "name": "Callback (error)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "position": [
         520,
         1140
@@ -259,7 +298,7 @@
       "main": [
         [
           {
-            "node": "Build Request",
+            "node": "Respond 202",
             "type": "main",
             "index": 0
           }
@@ -267,6 +306,17 @@
         [
           {
             "node": "Respond 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond 202": {
+      "main": [
+        [
+          {
+            "node": "Build Request",
             "type": "main",
             "index": 0
           }
@@ -310,14 +360,14 @@
       "main": [
         [
           {
-            "node": "Respond 200",
+            "node": "Callback (success)",
             "type": "main",
             "index": 0
           }
         ],
         [
           {
-            "node": "Respond 502",
+            "node": "Callback (error)",
             "type": "main",
             "index": 0
           }
@@ -329,6 +379,6 @@
   "settings": {},
   "pinData": {},
   "meta": {
-    "description": "CallLens analysis pipeline: HMAC-verified webhook -> Groq (llama-3.3-70b) structured JSON -> respond. Fast (~1-3s) so it fits Vercel Hobby's 10s function cap. Deterministic pipeline, not an agent."
+    "description": "CallLens async analysis pipeline: HMAC-verified webhook -> 202 accept -> Groq (llama-3.3-70b) in the background -> callback to the app with the result. Fits Vercel Hobby's 10s function cap. Deterministic pipeline, not an agent."
   }
 }

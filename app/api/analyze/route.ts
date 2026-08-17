@@ -11,7 +11,7 @@ import {
   validateUploadedFile,
   validateTextContent,
 } from '@/lib/validation';
-import { callN8nAnalysis } from '@/lib/n8n';
+import { dispatchN8nAnalysis } from '@/lib/n8n';
 import { mockAnalyze } from '@/lib/mock-analyzer';
 import { mode } from '@/lib/config';
 import { checkRateLimit } from '@/lib/rate-limit';
@@ -20,11 +20,11 @@ import { Errors, fileErrorMessage, json } from '@/lib/errors';
 
 export const maxDuration = 60;
 
-// ── POST /api/analyze — build plan §8.1 pipeline ──
-// The browser's ONLY entry point to the analysis pipeline. Everything from
-// here inward is server-only and HMAC-signed when it leaves for n8n.
-// (maxDuration above: Vercel function duration — Gemini round-trips take
-// 8–15 s, above the 10 s Hobby default; Pro allows up to 300 s.)
+// ── POST /api/analyze — async pipeline (build plan §8.1) ──
+// The browser's ONLY entry point. Validates + persists, dispatches the job to
+// n8n, and returns 202 immediately. n8n runs Groq in the background and calls
+// /api/analyze/callback when done (see §8.5). This keeps the request under
+// serverless function limits — works on Vercel Hobby's 10s cap.
 
 export async function POST(req: NextRequest) {
   try {
@@ -118,6 +118,7 @@ async function handleAnalyze(req: NextRequest) {
   const payload = analyzePayloadSchema.parse({
     conversation_id: conversation.id,
     file_name: file.name,
+    app_url: req.nextUrl.origin,
     transcript: normalized.turns.map((t) => ({
       seq: t.seq,
       speaker: t.speaker,
@@ -126,34 +127,39 @@ async function handleAnalyze(req: NextRequest) {
     })),
   });
 
-  // ── Analyze: real n8n when configured, deterministic mock otherwise
-  let result;
+  // ── Analyze: async n8n when configured, deterministic mock otherwise ──
   if (mode.n8nConfigured) {
-    const r = await callN8nAnalysis(payload, { timeoutMs: 90_000, maxRetries: 3 });
-    if (!r.ok || !r.result) {
+    // Fire-and-forget: n8n verifies the signature, accepts the job (202), then
+    // runs Groq and calls /api/analyze/callback with the result. We return
+    // immediately so the request stays inside the serverless time limit.
+    const dispatched = await dispatchN8nAnalysis(payload, { timeoutMs: 15_000 });
+    if (!dispatched.accepted) {
       // eslint-disable-next-line no-console
-      console.error('[/api/analyze] n8n failed:', r.code, r.error);
+      console.error('[/api/analyze] n8n rejected job:', dispatched.code, dispatched.error);
       await store.updateConversationStatus(conversation.id, 'failed');
-      if (r.code === 'invalid_output') {
-        return json({ error: Errors.invalidOutput }, 502);
+      if (dispatched.code === 'rejected') {
+        return json({ error: Errors.serviceUnavailable }, 502);
       }
       return json({ error: Errors.serviceUnavailable }, 502);
     }
-    result = r.result;
-  } else {
-    result = mockAnalyze(normalized);
+    return json(
+      {
+        conversationId: conversation.id,
+        status: 'processing',
+        cached: false,
+        detectedFormat: normalized.format,
+      },
+      202
+    );
   }
 
-  // ── Validate the LLM result on our side too (defense in depth, §8.4)
+  // Demo mode: run the mock synchronously and persist at once.
+  const result = mockAnalyze(normalized);
   const validated = analysisResultSchema.safeParse(result);
   if (!validated.success) {
-    // eslint-disable-next-line no-console
-    console.error('[/api/analyze] zod validation failed:', validated.error.format());
     await store.updateConversationStatus(conversation.id, 'failed');
     return json({ error: Errors.invalidOutput }, 502);
   }
-
-  // ── Persist analysis + sentences, flip status to 'done'
   try {
     await store.createAnalysis({
       conversationId: conversation.id,

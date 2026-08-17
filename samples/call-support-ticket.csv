@@ -1,0 +1,10 @@
+seq,speaker,text
+1,agent,Hi, you've reached HealthTrack IT support, this is Owen. What seems to be the trouble?
+2,customer,My app won't sync my steps. It's stuck on yesterday's count.
+3,agent,Let's fix that. Are you on wifi or cellular right now?
+4,customer,Wifi at home, signal looks fine.
+5,agent,Okay. Open Settings, then Accounts, and tap "Force sync" at the bottom.
+6,customer,Done. It's spinning now... oh it just updated, shows today's steps.
+7,agent,Perfect. That usually clears a stuck cache. Anything else?
+8,customer,No that's the main thing, thanks.
+9,agent,Great, glad it's working. Have a good one!

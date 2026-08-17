@@ -98,6 +98,9 @@ export type AnalysisResultSchemaType = z.infer<typeof analysisResultSchema>;
 export const analyzePayloadSchema = z.object({
   conversation_id: z.string().uuid(),
   file_name: z.string().min(1).max(200),
+  // Public origin of the calling app (used by n8n to call the async result
+  // callback). Sent inside the HMAC-signed payload so n8n trusts it.
+  app_url: z.string().url().optional(),
   transcript: z
     .array(
       z.object({

@@ -1,0 +1,13 @@
+[00:00] Rep: Good morning! This is Priya from NorthStar Cloud. Mind if I ask a couple of questions about your current setup?
+[00:04] Prospect: Sure, go ahead. We're evaluating storage options for our small team.
+[00:09] Rep: Great. How many people would need access, and roughly how much data are we talking?
+[00:14] Prospect: About twelve users, maybe two terabytes total, growing a bit each quarter.
+[00:20] Rep: Perfect fit. Are you more concerned about cost or about collaboration features?
+[00:26] Prospect: Honestly both, but collaboration matters more — we share files constantly.
+[00:32] Rep: Then our Team plan is ideal: shared workspaces, version history, and it's priced per seat so twelve users stays predictable.
+[00:40] Prospect: Does it integrate with Slack? That's where most of our chatter happens.
+[00:44] Rep: Yes, native Slack integration with previews and notifications. I can send a sandbox invite if you'd like.
+[00:51] Prospect: That'd be great. Let's set that up and I'll loop in my manager.
+[00:55] Rep: Wonderful. I'll email the invite now. Anything blocking a decision this week?
+[01:01] Prospect: No blockers. If the sandbox looks good, we'll probably sign.
+[01:05] Rep: Excellent. I'll follow up Thursday. Thanks for your time!

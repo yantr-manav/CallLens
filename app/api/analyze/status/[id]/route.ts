@@ -2,25 +2,30 @@ import 'server-only';
 import { NextRequest } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { getStore } from '@/lib/db/store';
-import { Errors, json } from '@/lib/errors';
+import { json } from '@/lib/errors';
 
-// GET /api/analyze/status/[id] — poll job status (used when the analysis is
-// async via the /api/n8n-callback path, or just to confirm completion).
+// ── GET /api/analyze/status/[id] ──
+// Lightweight poll endpoint for the async client. Returns the job status so
+// the UI can show progress and navigate to the report once 'done'.
+
+export const dynamic = 'force-dynamic';
+
 export async function GET(
   _req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   const user = await getCurrentUser();
-  if (!user) return json({ error: Errors.unauthorized }, 401);
+  if (!user) return json({ error: 'Unauthorized' }, 401);
 
-  const conversation = await getStore().getConversation(user.id, params.id);
-  if (!conversation) return json({ error: Errors.notFound }, 404);
+  const { id } = await params;
+  const store = getStore();
+  const conversation = await store.getConversation(user.id, id);
+  if (!conversation) return json({ error: 'Not found' }, 404);
 
   return json(
     {
       conversationId: conversation.id,
       status: conversation.status,
-      fileName: conversation.file_name,
       createdAt: conversation.created_at,
     },
     200
