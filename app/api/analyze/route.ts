@@ -18,6 +18,8 @@ import { checkRateLimit } from '@/lib/rate-limit';
 import { type FileValidationError } from '@/lib/validation';
 import { Errors, fileErrorMessage, json } from '@/lib/errors';
 
+export const maxDuration = 60;
+
 // ── POST /api/analyze — build plan §8.1 pipeline ──
 // The browser's ONLY entry point to the analysis pipeline. Everything from
 // here inward is server-only and HMAC-signed when it leaves for n8n.
@@ -26,10 +28,8 @@ export async function POST(req: NextRequest) {
     return await handleAnalyze(req);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (process.env.NODE_ENV !== 'production') {
-      // eslint-disable-next-line no-console
-      console.error('[/api/analyze] uncaught:', msg);
-    }
+    // eslint-disable-next-line no-console
+    console.error('[/api/analyze] uncaught:', msg);
     return json({ error: Errors.serviceUnavailable }, 500);
   }
 }
@@ -128,6 +128,8 @@ async function handleAnalyze(req: NextRequest) {
   if (mode.n8nConfigured) {
     const r = await callN8nAnalysis(payload, { timeoutMs: 90_000, maxRetries: 3 });
     if (!r.ok || !r.result) {
+      // eslint-disable-next-line no-console
+      console.error('[/api/analyze] n8n failed:', r.code, r.error);
       await store.updateConversationStatus(conversation.id, 'failed');
       if (r.code === 'invalid_output') {
         return json({ error: Errors.invalidOutput }, 502);
@@ -142,6 +144,8 @@ async function handleAnalyze(req: NextRequest) {
   // ── Validate the LLM result on our side too (defense in depth, §8.4)
   const validated = analysisResultSchema.safeParse(result);
   if (!validated.success) {
+    // eslint-disable-next-line no-console
+    console.error('[/api/analyze] zod validation failed:', validated.error.format());
     await store.updateConversationStatus(conversation.id, 'failed');
     return json({ error: Errors.invalidOutput }, 502);
   }
@@ -152,7 +156,9 @@ async function handleAnalyze(req: NextRequest) {
       conversationId: conversation.id,
       result: validated.data,
     });
-  } catch {
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[/api/analyze] store analysis failed:', err);
     await store.updateConversationStatus(conversation.id, 'failed');
     return json({ error: Errors.serviceUnavailable }, 502);
   }
