@@ -11,14 +11,17 @@
 import { writeFileSync } from 'node:fs';
 
 // ── values you must paste into the Config node after import (n8n editor) ──
+// If GROQ_API_KEY is present in the shell env when this script runs, it is
+// baked straight into the generated workflow (so you can re-import without
+// touching the Config node). Otherwise a placeholder is emitted.
 const SECRET_PLACEHOLDER = 'PASTE_N8N_WEBHOOK_SECRET_HERE';
-const KEY_PLACEHOLDER = 'PASTE_GEMINI_API_KEY_HERE';
+const KEY_PLACEHOLDER = process.env.GROQ_API_KEY || 'PASTE_GROQ_API_KEY_HERE';
 
 const configCode = `
 // Single place to paste the two secrets. Code-node pass-through is reliable in
 // n8n 2.x (unlike Set nodes, which dropped the payload in this setup).
 const inp = $json || {};
-return [{ json: { ...inp, N8N_WEBHOOK_SECRET: '${SECRET_PLACEHOLDER}', GEMINI_API_KEY: '${KEY_PLACEHOLDER}' } }];
+return [{ json: { ...inp, N8N_WEBHOOK_SECRET: '${SECRET_PLACEHOLDER}', GROQ_API_KEY: '${KEY_PLACEHOLDER}' } }];
 `;
 
 const verifyCode = `
@@ -42,7 +45,7 @@ return [{ json: { ...inp, valid: valid } }];
 
 const buildCode = `
 const inp = $input.first().json || {};
-const apiKey = String(inp.GEMINI_API_KEY || inp.apiKey || '');
+const apiKey = String(inp.GROQ_API_KEY || inp.apiKey || '');
 const payload = inp.payload || inp.body || {};
 const transcript = Array.isArray(payload.transcript) ? payload.transcript : [];
 const lines = transcript.map(function (t) { return t.speaker + ': ' + t.text; }).join('\\n');
@@ -165,23 +168,28 @@ const systemPrompt = 'You are CallLens, a precise conversation-intelligence engi
 
 const prompt = systemPrompt + '\\n\\nTRANSCRIPT:\\n' + lines;
 
+// Groq is OpenAI-compatible and returns in ~1-3s (vs 8-15s for Gemini), which
+// keeps the whole call inside Vercel Hobby's 10s function cap. It does NOT
+// support a JSON responseSchema, so the schema lives in the system prompt and
+// the app re-validates the shape with Zod.
 const requestBody = {
-  contents: [{ role: 'user', parts: [{ text: prompt }] }],
-  // NOTE: no responseSchema — Gemini cannot express nullable unions like
-  // ['integer','null']; it rejects such schemas with "Proto field is not
-  // repeating". The full schema is embedded in the prompt instead and the
-  // app's Zod validation enforces the shape.
-  generationConfig: { temperature: 0.1, responseMimeType: 'application/json' }
+  model: 'llama-3.3-70b-versatile',
+  messages: [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: lines }
+  ],
+  temperature: 0.1,
+  response_format: { type: 'json_object' }
 };
 
-return [{ json: { requestBody: requestBody, conversation_id: payload.conversation_id, file_name: payload.file_name || '', GEMINI_API_KEY: apiKey } }];
+return [{ json: { requestBody: requestBody, conversation_id: payload.conversation_id, file_name: payload.file_name || '', GROQ_API_KEY: apiKey } }];
 `;
 
-const geminiCallCode = `
+const groqCallCode = `
 // require('https') — the n8n 2.x httpRequest node mangled JSON bodies here,
 // and Code nodes have neither global fetch nor $helpers. This sends the exact
 // bytes we built (needs NODE_FUNCTION_ALLOW_BUILTIN=crypto,https on the n8n
-// container).
+// container — n8n Cloud allows all builtins by default).
 const https = require('https');
 const inp = $input.first().json || {};
 const payload = JSON.stringify(inp.requestBody || {});
@@ -189,11 +197,11 @@ let status = 0;
 let text = '';
 let parsed = null;
 await new Promise(function (resolve) {
-  const req = https.request('https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent', {
+  const req = https.request('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-goog-api-key': String(inp.GEMINI_API_KEY || '')
+      'Authorization': 'Bearer ' + String(inp.GROQ_API_KEY || '')
     }
   }, function (res) {
     status = res.statusCode || 0;
@@ -208,26 +216,26 @@ await new Promise(function (resolve) {
   req.write(payload);
   req.end();
 });
-return [{ json: { ...inp, httpStatus: status, geminiResponse: parsed, geminiRaw: text.slice(0, 2000) } }];
+return [{ json: { ...inp, httpStatus: status, groqResponse: parsed, groqRaw: text.slice(0, 2000) } }];
 `;
 
 const validateCode = `
-// Extract the JSON text from the Gemini response and parse it. Routing to a
-// 200 vs 502 response happens in the "Output Valid?" IF node.
+// Extract the JSON text from the Groq chat-completion response and parse it.
+// Routing to a 200 vs 502 response happens in the "Output Valid?" IF node.
 const item = $input.first().json;
-const data = (item && item.geminiResponse) || {};
-let text = '';
-const candidates = data.candidates || [];
-for (const c of candidates) {
-  const parts = (c && c.content && c.content.parts) || [];
-  for (const p of parts) {
-    if (p && p.text) text += p.text;
-  }
+const data = (item && item.groqResponse) || {};
+const choices = data.choices || [];
+const msg = (choices[0] && choices[0].message) || {};
+let text = typeof msg.content === 'string' ? msg.content : '';
+// Groq may (rarely) wrap JSON in markdown fences — strip them before parsing.
+let cleaned = text.trim();
+if (cleaned.startsWith('\`\`\`')) {
+  cleaned = cleaned.replace(/^\`\`\`(?:json)?\s*/i, '').replace(/\s*\`\`\`$/, '');
 }
 let result = null;
 let ok = false;
 try {
-  result = JSON.parse(text);
+  result = JSON.parse(cleaned);
   ok = true;
 } catch (e) {
   ok = false;
@@ -298,9 +306,9 @@ const nodes = [
     position: [320, 260],
   },
   {
-    parameters: { jsCode: geminiCallCode },
-    id: uid('gemini'),
-    name: 'Call Gemini',
+    parameters: { jsCode: groqCallCode },
+    id: uid('groq'),
+    name: 'Call Groq',
     type: 'n8n-nodes-base.code',
     typeVersion: 2,
     position: [320, 480],
@@ -399,8 +407,8 @@ const connections = {
       [{ node: 'Respond 401', type: 'main', index: 0 }],
     ],
   },
-  'Build Request': { main: [[{ node: 'Call Gemini', type: 'main', index: 0 }]] },
-  'Call Gemini': { main: [[{ node: 'Validate Output', type: 'main', index: 0 }]] },
+  'Build Request': { main: [[{ node: 'Call Groq', type: 'main', index: 0 }]] },
+  'Call Groq': { main: [[{ node: 'Validate Output', type: 'main', index: 0 }]] },
   'Validate Output': {
     main: [[{ node: 'Output Valid?', type: 'main', index: 0 }]],
   },
@@ -423,7 +431,7 @@ const workflow = {
   pinData: {},
   meta: {
     description:
-      'CallLens analysis pipeline: HMAC-verified webhook -> Gemini 3.6 Flash structured output -> respond. Deterministic pipeline, not an agent.',
+      'CallLens analysis pipeline: HMAC-verified webhook -> Groq (llama-3.3-70b) structured JSON -> respond. Fast (~1-3s) so it fits Vercel Hobby\'s 10s function cap. Deterministic pipeline, not an agent.',
   },
 };
 

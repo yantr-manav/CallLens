@@ -83,16 +83,19 @@ re-billed).
 3. Copy `.env.example` → `.env.local`, fill `NEXT_PUBLIC_SUPABASE_URL`,
    `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`.
 
-### 2. n8n Cloud + Gemini
+### 2. n8n Cloud + Groq (fast — fits Vercel Hobby's 10s cap)
+
+Gemini takes 8–15s and trips Vercel Hobby's 10s function limit. The pipeline
+uses **Groq** (`llama-3.3-70b-versatile`, ~1–3s) instead, which keeps the whole
+round-trip well inside the cap. Get a free key at https://console.groq.com/keys.
 
 1. Create a free n8n Cloud instance (`<your-sub>.app.n8n.cloud`).
 2. **Import the workflow** — either:
-   - **Recommended:** run `node scripts/build-n8n-workflow.mjs`, then patch the
-     two placeholders in `n8n/CALLLENS_ANALYZE_CONVERSATION.json`
-     (`PASTE_N8N_WEBHOOK_SECRET_HERE` → your secret, `PASTE_GEMINI_API_KEY_HERE`
-     → your Gemini key) and import into n8n; or
-   - import the JSON as-is and open the **Config** Code node → set
-     `N8N_WEBHOOK_SECRET` and `GEMINI_API_KEY` to the real values.
+   - **Recommended:** import `n8n/CALLLENS_ANALYZE_CONVERSATION.json`, then open
+     the **Config** Code node and set `N8N_WEBHOOK_SECRET` (must equal the app's
+     `N8N_WEBHOOK_SECRET`) and `GROQ_API_KEY` (your Groq key); or
+   - run `node scripts/build-n8n-workflow.mjs` with `GROQ_API_KEY` exported to
+     bake the key straight into the generated file, then import.
 3. Activate the workflow (toggle). Test:
    `curl -X POST https://<your-sub>.app.n8n.cloud/webhook/calllens-analyze -H "Content-Type: application/json" -d '{}'`
    → expect a 401-style rejection (proves it's live), and a valid analysis JSON

@@ -99,13 +99,25 @@ export async function signUpUser(
       options: { data: { full_name: name.trim() } },
     });
     if (error) {
-      // Map common Supabase errors to friendly messages.
+      // Map common Supabase errors to friendly, actionable messages.
       const msg = error.message.toLowerCase();
       if (msg.includes('already registered') || msg.includes('already been registered')) {
         return { ok: false, error: 'An account with this email already exists. Sign in instead.' };
       }
       if (msg.includes('password')) {
         return { ok: false, error: 'Password must be at least 8 characters.' };
+      }
+      if (
+        msg.includes('email') ||
+        msg.includes('send') ||
+        msg.includes('rate') ||
+        msg.includes('confirm')
+      ) {
+        return {
+          ok: false,
+          error:
+            "Email confirmation is enabled but the email couldn't be sent. In Supabase, turn OFF 'Confirm email' (Authentication → Providers → Email), or configure SMTP, then retry.",
+        };
       }
       return { ok: false, error: 'Could not create the account. Please try again.' };
     }
