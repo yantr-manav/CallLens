@@ -3,6 +3,7 @@ import { Inter, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 import { Toaster } from '@/components/ui/toaster';
 import { ThemeProvider } from '@/components/theme-provider';
+import { HashSessionHandler } from '@/components/auth/hash-session-handler';
 
 const inter = Inter({
   subsets: ['latin'],
@@ -40,6 +41,9 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className={`${inter.variable} ${jetbrains.variable} font-sans`}>
         <ThemeProvider>{children}</ThemeProvider>
+        {/* Redeems Supabase confirmation links that arrive as a URL fragment.
+            Renders nothing unless a token is actually present in the hash. */}
+        <HashSessionHandler />
         <Toaster />
       </body>
     </html>

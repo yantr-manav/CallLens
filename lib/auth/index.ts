@@ -2,7 +2,7 @@ import 'server-only';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { env, mode } from '@/lib/config';
-import { getServerClient } from '@/lib/supabase/server';
+import { getServerClient, getServiceClient } from '@/lib/supabase/server';
 import type { AuthUser } from '@/lib/types';
 import {
   SESSION_COOKIE,
@@ -90,75 +90,80 @@ export async function signInUser(
   return { ok: false, error: 'Invalid email or password.' };
 }
 
-// Self-service account creation — credentials are stored by Supabase Auth
-// (auth.users) and the profiles row is auto-created by the on_auth_user_created
-// trigger (supabase/migrations/0001_init.sql). When email confirmation is
-// enabled on the project, signUp returns needsConfirmation and the user must
-// confirm before the first sign-in.
+// ── Self-service account creation — NO email confirmation ──
+//
+// The account row is written to the database immediately and marked confirmed,
+// so the user can sign in the moment they finish the form.
+//
+// This deliberately does NOT use client.auth.signUp(). That path always runs
+// the project's email-confirmation flow, which meant sign-up depended on
+// Supabase's built-in mailer — capped at a couple of messages an hour on the
+// free tier. When it refused to send, the whole sign-up failed and no user was
+// created at all. Even when it did send, the confirmation link came back as a
+// one-time code the app had to redeem before the account worked.
+//
+// admin.createUser() with email_confirm: true skips all of it: one write, no
+// mail, account usable straight away. Credentials still live in Supabase Auth
+// (auth.users, bcrypt-hashed by Postgres), and the on_auth_user_created trigger
+// still populates public.profiles — so RLS, which keys off auth.uid(), keeps
+// working exactly as before.
 export async function signUpUser(
   name: string,
   email: string,
-  password: string,
-  /**
-   * Public origin of the running app, e.g. http://localhost:3000. Used to build
-   * the confirmation-link destination. Without it Supabase falls back to the
-   * project's Site URL, which is the bare origin — the one-time code then lands
-   * on `/` where nothing redeems it.
-   */
-  origin?: string
-): Promise<{ ok: boolean; error?: string; needsConfirmation?: boolean }> {
-  if (mode.supabaseConfigured) {
-    const client = await getServerClient();
-    if (!client) return { ok: false, error: 'Auth service unavailable.' };
-    const { data, error } = await client.auth.signUp({
-      email: email.trim().toLowerCase(),
-      password,
-      options: {
-        data: { full_name: name.trim() },
-        ...(origin ? { emailRedirectTo: `${origin}/auth/callback` } : {}),
-      },
-    });
-    if (error) {
-      // Map common Supabase errors to friendly, actionable messages.
-      const msg = error.message.toLowerCase();
-      if (msg.includes('already registered') || msg.includes('already been registered')) {
-        return { ok: false, error: 'An account with this email already exists. Sign in instead.' };
-      }
-      if (msg.includes('password')) {
-        return { ok: false, error: 'Password must be at least 8 characters.' };
-      }
-      if (msg.includes('disabled') || msg.includes('provider')) {
-        return {
-          ok: false,
-          error:
-            'Email sign-in is disabled in your Supabase project. Enable Authentication → Providers → Email.',
-        };
-      }
-      if (
-        msg.includes('email') ||
-        msg.includes('send') ||
-        msg.includes('rate') ||
-        msg.includes('confirm')
-      ) {
-        return {
-          ok: false,
-          error:
-            "Email confirmation is enabled but the email couldn't be sent. In Supabase, turn OFF 'Confirm email' (Authentication → Providers → Email), or configure SMTP, then retry.",
-        };
-      }
-      return { ok: false, error: 'Could not create the account. Please try again.' };
-    }
-    const created = data.user?.created_at != null;
-    const session = data.session != null;
-    if (created && !session) {
-      return { ok: true, needsConfirmation: true };
-    }
-    return { ok: true };
+  password: string
+): Promise<{ ok: boolean; error?: string }> {
+  if (!mode.supabaseConfigured) {
+    return {
+      ok: false,
+      error: 'Account creation is only available when Supabase is configured.',
+    };
   }
-  return {
-    ok: false,
-    error: 'Account creation is only available when Supabase is configured.',
-  };
+
+  // Creating a pre-confirmed user is a privileged operation, so it needs the
+  // service key. This only ever runs server-side.
+  const service = getServiceClient();
+  if (!service) {
+    return {
+      ok: false,
+      error:
+        'Account creation needs SUPABASE_SERVICE_ROLE_KEY to be set on the server.',
+    };
+  }
+
+  const cleanEmail = email.trim().toLowerCase();
+
+  const { error } = await service.auth.admin.createUser({
+    email: cleanEmail,
+    password,
+    email_confirm: true, // no verification mail, account active immediately
+    user_metadata: { full_name: name.trim() },
+  });
+
+  if (error) {
+    const msg = error.message.toLowerCase();
+    if (
+      msg.includes('already registered') ||
+      msg.includes('already been registered') ||
+      msg.includes('already exists') ||
+      msg.includes('duplicate')
+    ) {
+      return {
+        ok: false,
+        error: 'An account with this email already exists. Sign in instead.',
+      };
+    }
+    if (msg.includes('password')) {
+      return { ok: false, error: 'Password must be at least 8 characters.' };
+    }
+    if (msg.includes('email') && msg.includes('invalid')) {
+      return { ok: false, error: 'Enter a valid email address.' };
+    }
+    // eslint-disable-next-line no-console
+    console.error('[auth] createUser failed:', error.message);
+    return { ok: false, error: 'Could not create the account. Please try again.' };
+  }
+
+  return { ok: true };
 }
 
 export async function signOutUser(): Promise<void> {

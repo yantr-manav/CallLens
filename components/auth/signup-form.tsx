@@ -7,13 +7,13 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent } from '@/components/ui/card';
-import { Loader2, UserPlus, MailCheck } from 'lucide-react';
+import { Loader2, UserPlus, CheckCircle2 } from 'lucide-react';
 
 export function SignupForm() {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
-  const [confirmed, setConfirmed] = useState(false);
+  const [done, setDone] = useState(false);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -41,27 +41,30 @@ export function SignupForm() {
         setError(data?.error ?? 'Could not create the account. Please try again.');
         return;
       }
-      if (data?.needsConfirmation) {
-        setConfirmed(true);
-        return;
-      }
-      router.push('/dashboard');
-      router.refresh();
+      // The account is live immediately — no email step. Show a brief
+      // confirmation, then hand off to sign-in with the email prefilled.
+      setDone(true);
+      setTimeout(() => {
+        router.push(`/login?registered=1&email=${encodeURIComponent(email.trim())}`);
+        router.refresh();
+      }, 900);
     });
   }
 
-  if (confirmed) {
+  if (done) {
     return (
       <Card className="shadow-sm">
         <CardContent className="p-6 text-center">
-          <MailCheck className="mx-auto mb-3 h-8 w-8 text-primary" />
-          <h2 className="text-base font-semibold">Check your email</h2>
+          <CheckCircle2 className="mx-auto mb-3 h-8 w-8 text-success" />
+          <h2 className="text-base font-semibold">Account created</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            We sent a confirmation link to <span className="font-medium text-foreground">{email}</span>.
-            Click it, then sign in with your new credentials.
+            <span className="font-medium text-foreground">{email}</span> is ready.
+            Taking you to sign in…
           </p>
-          <Button asChild className="mt-4 w-full">
-            <Link href="/login">Back to sign in</Link>
+          <Button asChild variant="outline" className="mt-4 w-full">
+            <Link href={`/login?email=${encodeURIComponent(email.trim())}`}>
+              Sign in now
+            </Link>
           </Button>
         </CardContent>
       </Card>

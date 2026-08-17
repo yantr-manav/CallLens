@@ -8,7 +8,7 @@ import { Activity } from 'lucide-react';
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: { next?: string; error?: string };
+  searchParams: { next?: string; error?: string; registered?: string; email?: string };
 }) {
   // Same-origin absolute paths only. `next` already starts with '/', so the old
   // `/${next}` produced '//dashboard' — which browsers read as a
@@ -34,7 +34,16 @@ export default async function LoginPage({
           </p>
         </div>
 
-        {/* Surfaced by /auth/callback when a confirmation link fails. */}
+        {/* Handed over by the sign-up form once the account is created. */}
+        {searchParams.registered && !searchParams.error && (
+          <p
+            role="status"
+            className="mb-4 rounded-md border border-success/30 bg-success/10 px-3 py-2 text-sm text-success"
+          >
+            Account created. Sign in to continue.
+          </p>
+        )}
+
         {searchParams.error && (
           <p
             role="alert"
@@ -44,7 +53,7 @@ export default async function LoginPage({
           </p>
         )}
 
-        <LoginForm next={searchParams.next} />
+        <LoginForm next={searchParams.next} initialEmail={searchParams.email} />
 
         <p className="mt-4 text-center text-sm text-muted-foreground">
           New to CallLens?{' '}

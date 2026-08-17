@@ -8,7 +8,7 @@ Postgres, Supabase Storage and Supabase Auth.
 
 | | **Demo mode** (no env) | **Live mode** (`.env` filled) |
 |---|---|---|
-| Auth | HMAC cookie, demo user `demo@calllens.local` | Supabase Auth (sign up → sign in) |
+| Auth | HMAC cookie, demo user `demo@calllens.local` | Supabase Auth — instant sign-up, no email confirmation |
 | Storage | `.local-store/db.json` (file-based) | Supabase Postgres + Storage |
 | Analyzer | Deterministic heuristic | n8n Cloud → Groq `openai/gpt-oss-120b` |
 
@@ -19,7 +19,7 @@ Typical live analysis: **~5–7 seconds** end to end.
 | Requirement | Where it lives |
 |---|---|
 | React / Next.js frontend, deployable on Vercel | Next.js 14 App Router, `app/` |
-| Login screen | `app/login`, `app/signup` → Supabase Auth |
+| Login screen | `app/login`, `app/signup` → Supabase Auth (instant sign-up, no email step) |
 | File upload (`.txt`) | `components/analyze/upload-zone.tsx` → `app/api/analyze` |
 | Results dashboard | `app/reports/[id]`, `app/dashboard` |
 | n8n / agentic orchestration | `n8n/`, `scripts/build-n8n-workflow.mjs`, `lib/n8n.ts` |
@@ -129,13 +129,36 @@ node scripts/migrate-supabase.mjs
 Applies every file in `supabase/migrations/` in order and verifies the tables,
 the `transcripts` bucket and RLS. Needs `DATABASE_URL` in `.env`.
 
-Then in the Supabase dashboard: **Authentication → Providers → Email: enable
-"Email"**. Disabling **"Confirm email"** lets new accounts sign in immediately,
-which is what you want for a demo — otherwise sign-up stops at "check your
-inbox".
+In the Supabase dashboard, enable **Authentication → Providers → Email**. You do
+**not** need to touch "Confirm email", and no SMTP setup is required — see below.
 
 Copy `.env.example` → `.env` and fill `NEXT_PUBLIC_SUPABASE_URL`,
 `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`.
+
+#### Sign-up sends no email
+
+`signUpUser()` (`lib/auth/index.ts`) creates the account with the service-role
+**`auth.admin.createUser({ email_confirm: true })`** rather than
+`auth.signUp()`. The account row is written to the database and marked confirmed
+in one call, so the user can sign in the instant they submit the form:
+
+```
+/signup  →  user written to auth.users + profiles  →  /login  →  /dashboard
+```
+
+`auth.signUp()` was abandoned because it always runs the project's confirmation
+flow. That made account creation depend on Supabase's built-in mailer — roughly
+two messages an hour on the free tier — and when it refused to send, sign-up
+failed outright and **no user was created at all**. Even on success, the link
+came back as a one-time code the app then had to redeem.
+
+Credentials still live in Supabase Auth (bcrypt-hashed by Postgres), the
+`on_auth_user_created` trigger still fills `public.profiles`, and RLS still keys
+off `auth.uid()` — so nothing about the security model changes.
+
+`app/auth/callback/route.ts` and `HashSessionHandler` are retained so that any
+confirmation link issued *before* this change still resolves cleanly instead of
+dead-ending on `/?code=…`, and so password-reset links work if you add them.
 
 ### 2. n8n Cloud + Groq
 

@@ -23,11 +23,18 @@ function safeNext(next?: string): string {
   return next;
 }
 
-export function LoginForm({ next }: { next?: string }) {
+export function LoginForm({
+  next,
+  initialEmail,
+}: {
+  next?: string;
+  /** Prefilled after sign-up so the user only types their password. */
+  initialEmail?: string;
+}) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState(initialEmail ?? '');
   const [password, setPassword] = useState('');
 
   function onSubmit(e: React.FormEvent) {
