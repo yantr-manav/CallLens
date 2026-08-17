@@ -23,9 +23,17 @@ const FILTERS: Array<{ key: Filter; label: string }> = [
   { key: 'negative', label: 'Negative' },
 ];
 
-export function SentenceTable({ result }: { result: AnalysisResult }) {
+export function SentenceTable({
+  result,
+  highlightSeqs,
+}: {
+  result: AnalysisResult;
+  /** Seqs called out as important moments — highlighted and link-targetable. */
+  highlightSeqs?: number[];
+}) {
   const [filter, setFilter] = useState<Filter>('all');
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const highlighted = useMemo(() => new Set(highlightSeqs ?? []), [highlightSeqs]);
 
   const rows = useMemo(
     () =>
@@ -47,7 +55,13 @@ export function SentenceTable({ result }: { result: AnalysisResult }) {
   return (
     <div className="rounded-lg border border-border bg-card">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
-        <h2 className="text-base font-medium">Sentence-level analysis</h2>
+        <div>
+          <h2 className="text-base font-medium">Sentence-level analysis</h2>
+          <p className="text-xs text-muted-foreground">
+            One row per transcript turn. Click a row to see the evidence behind
+            its label.
+          </p>
+        </div>
         <div className="flex gap-1">
           {FILTERS.map((f) => (
             <Button
@@ -83,9 +97,21 @@ export function SentenceTable({ result }: { result: AnalysisResult }) {
           <TableBody>
             {rows.map((s) => {
               const isOpen = expanded.has(s.seq);
-              const text = isOpen ? s.text : s.text.length > 100 ? `${s.text.slice(0, 100)}…` : s.text;
+              const expandable = s.text.length > 100 || Boolean(s.evidence);
+              const text = isOpen
+                ? s.text
+                : s.text.length > 100
+                  ? `${s.text.slice(0, 100)}…`
+                  : s.text;
               return (
-                <TableRow key={s.seq}>
+                <TableRow
+                  key={s.seq}
+                  id={`turn-${s.seq}`}
+                  className={cn(
+                    'scroll-mt-24',
+                    highlighted.has(s.seq) && 'bg-accent/40'
+                  )}
+                >
                   <TableCell className="text-right text-xs tabular-nums text-muted-foreground">
                     {s.seq}
                   </TableCell>
@@ -94,13 +120,27 @@ export function SentenceTable({ result }: { result: AnalysisResult }) {
                   </TableCell>
                   <TableCell
                     className={cn(
-                      'max-w-0 cursor-pointer text-sm',
-                      s.text.length > 100 && 'hover:underline'
+                      'max-w-0 text-sm',
+                      expandable && 'cursor-pointer hover:underline'
                     )}
-                    onClick={() => s.text.length > 100 && toggle(s.seq)}
-                    title={s.text.length > 100 ? (isOpen ? 'Click to collapse' : 'Click to expand') : undefined}
+                    onClick={() => expandable && toggle(s.seq)}
+                    title={
+                      expandable
+                        ? isOpen
+                          ? 'Click to collapse'
+                          : 'Click to see the evidence'
+                        : undefined
+                    }
                   >
                     {text}
+                    {/* The model's verbatim justification for this label — the
+                        core of the "clear reasoning" requirement. It was
+                        captured in raw_json all along but never rendered. */}
+                    {isOpen && s.evidence && (
+                      <blockquote className="mt-1.5 border-l-2 border-primary/40 pl-2 text-xs italic text-muted-foreground">
+                        “{s.evidence}”
+                      </blockquote>
+                    )}
                   </TableCell>
                   <TableCell>
                     <Badge
