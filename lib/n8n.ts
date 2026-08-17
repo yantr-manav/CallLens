@@ -85,6 +85,21 @@ export async function callN8nAnalysis(
       if (!json) {
         return { ok: false, code: 'invalid_output', error: 'Empty response from n8n.' };
       }
+      // n8n Cloud wraps non-2xx Respond-node responses as HTTP 200 with the
+      // error envelope in the body — detect that here, not by status code.
+      if (
+        typeof json === 'object' &&
+        json !== null &&
+        typeof (json as { error?: unknown }).error === 'string' &&
+        !(json as { summary?: unknown }).summary
+      ) {
+        const err = (json as { error: string }).error;
+        return {
+          ok: false,
+          code: err.toLowerCase().includes('signature') ? 'rejected' : 'invalid_output',
+          error: err,
+        };
+      }
       const result = normalizeAnalysisResult(json);
       if (!result) {
         return { ok: false, code: 'invalid_output', error: 'Invalid analysis output from n8n.' };

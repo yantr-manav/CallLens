@@ -45,7 +45,7 @@ export async function middleware(req: NextRequest) {
   const isProtected = PROTECTED.some((p) =>
     pathname === p || pathname.startsWith(p + '/')
   );
-  const isLogin = pathname === '/login';
+  const isLogin = pathname === '/login' || pathname === '/signup';
 
   if (!isProtected && !isLogin) return NextResponse.next();
 

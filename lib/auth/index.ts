@@ -80,6 +80,48 @@ export async function signInUser(
   return { ok: false, error: 'Invalid email or password.' };
 }
 
+// Self-service account creation — credentials are stored by Supabase Auth
+// (auth.users) and the profiles row is auto-created by the on_auth_user_created
+// trigger (supabase/migrations/0001_init.sql). When email confirmation is
+// enabled on the project, signUp returns needsConfirmation and the user must
+// confirm before the first sign-in.
+export async function signUpUser(
+  name: string,
+  email: string,
+  password: string
+): Promise<{ ok: boolean; error?: string; needsConfirmation?: boolean }> {
+  if (mode.supabaseConfigured) {
+    const client = await getServerClient();
+    if (!client) return { ok: false, error: 'Auth service unavailable.' };
+    const { data, error } = await client.auth.signUp({
+      email: email.trim().toLowerCase(),
+      password,
+      options: { data: { full_name: name.trim() } },
+    });
+    if (error) {
+      // Map common Supabase errors to friendly messages.
+      const msg = error.message.toLowerCase();
+      if (msg.includes('already registered') || msg.includes('already been registered')) {
+        return { ok: false, error: 'An account with this email already exists. Sign in instead.' };
+      }
+      if (msg.includes('password')) {
+        return { ok: false, error: 'Password must be at least 8 characters.' };
+      }
+      return { ok: false, error: 'Could not create the account. Please try again.' };
+    }
+    const created = data.user?.created_at != null;
+    const session = data.session != null;
+    if (created && !session) {
+      return { ok: true, needsConfirmation: true };
+    }
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    error: 'Account creation is only available when Supabase is configured.',
+  };
+}
+
 export async function signOutUser(): Promise<void> {
   const store = await cookies();
   if (mode.supabaseConfigured) {

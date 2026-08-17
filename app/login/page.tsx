@@ -1,4 +1,5 @@
 import { redirect } from 'next/navigation';
+import Link from 'next/link';
 import { getCurrentUser } from '@/lib/auth';
 import { modeSummary } from '@/lib/config';
 import { LoginForm } from '@/components/auth/login-form';
@@ -28,6 +29,13 @@ export default async function LoginPage({
         </div>
 
         <LoginForm next={searchParams.next} />
+
+        <p className="mt-4 text-center text-sm text-muted-foreground">
+          New to CallLens?{' '}
+          <Link href="/signup" className="font-medium text-primary hover:underline">
+            Create an account
+          </Link>
+        </p>
 
         <div className="mt-6 space-y-1 text-center">
           {lines.map((l) => (

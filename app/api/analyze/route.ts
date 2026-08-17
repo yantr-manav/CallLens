@@ -23,6 +23,9 @@ export const maxDuration = 60;
 // ── POST /api/analyze — build plan §8.1 pipeline ──
 // The browser's ONLY entry point to the analysis pipeline. Everything from
 // here inward is server-only and HMAC-signed when it leaves for n8n.
+// (maxDuration above: Vercel function duration — Gemini round-trips take
+// 8–15 s, above the 10 s Hobby default; Pro allows up to 300 s.)
+
 export async function POST(req: NextRequest) {
   try {
     return await handleAnalyze(req);

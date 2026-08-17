@@ -19,8 +19,6 @@ export const env = {
   n8nWebhookUrl: required('N8N_WEBHOOK_URL'),
   n8nWebhookSecret: required('N8N_WEBHOOK_SECRET'),
 
-  geminiApiKey: required('GEMINI_API_KEY'),
-
   upstashRedisUrl: required('UPSTASH_REDIS_REST_URL'),
   upstashRedisToken: required('UPSTASH_REDIS_REST_TOKEN'),
 
@@ -39,7 +37,6 @@ export const mode = {
   supabaseConfigured: Boolean(env.supabaseUrl && env.supabaseAnonKey),
   serviceKeyConfigured: Boolean(env.supabaseServiceRoleKey),
   n8nConfigured: Boolean(env.n8nWebhookUrl && env.n8nWebhookSecret),
-  geminiConfigured: Boolean(env.geminiApiKey),
   upstashConfigured: Boolean(env.upstashRedisUrl && env.upstashRedisToken),
 };
 

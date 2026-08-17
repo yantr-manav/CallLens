@@ -2,16 +2,14 @@
 
 Upload a call transcript, get back a full intelligence report: sentiment,
 resolution status, escalation risk, customer experience, agent quality,
-emotion signals and a sentence-level breakdown — powered by an n8n-orchestrated
-Gemini pipeline.
+emotion signals and a sentence-level breakdown — powered by an n8n Cloud +
+Gemini pipeline with Supabase storage and Supabase Auth (self-service sign-up).
 
-Two modes, zero code changes:
-
-| | **Demo mode** (default) | **Live mode** (`.env.local` filled) |
+| | **Demo mode** (no env) | **Live mode** (`.env.local` filled) |
 |---|---|---|
-| Auth | HMAC cookie, demo user `demo@calllens.local` / `calllens` | Supabase Auth |
+| Auth | HMAC cookie, demo user `demo@calllens.local` / `calllens` | Supabase Auth (create account → sign in) |
 | Storage | `.local-store/db.json` (file-based) | Supabase Postgres + Storage |
-| Analyzer | Deterministic local mock | n8n → Gemini via HMAC webhook |
+| Analyzer | Deterministic local mock | n8n Cloud → Gemini via HMAC webhook |
 
 ## Architecture
 
@@ -33,10 +31,10 @@ flowchart LR
         PERSIST --> PIPELINE{Real n8n?}
         PIPELINE -- no --> MOCK[Mock analyzer]
         PIPELINE -- yes --> HMAC[HMAC-sign payload]
-        HMAC --> N8N[(n8n · Docker)]
+        HMAC --> N8N[(n8n Cloud webhook)]
         N8N --> GEM[Gemini structured output]
         GEM --> ZOD[Zod validate]
-        ZOD --> STORE[(Supabase/local store)]
+        ZOD --> STORE[(Supabase)]
         STORE --> UI
     end
     MOCK --> ZOD
@@ -44,17 +42,16 @@ flowchart LR
 
 ```
 app/
-  (auth) login · middleware guard · api/auth/*
-  api/analyze            ← browser entry point (§8.1 pipeline)
+  login / signup           ← Supabase Auth (email + password)
+  api/analyze              ← browser entry point (§8.1 pipeline)
   api/analyze/status/[id]
+  api/auth/*               ← login / signup / logout / me
   api/reports, api/reports/[id]
-  api/n8n-callback       ← webhook acknowledgment path
   dashboard / analyze / reports / reports/[id]
 components/   shadcn/ui primitives + app shell + report widgets
 lib/          config · auth/session · db/{store,local,supabase} · storage
               normalize · n8n · mock-analyzer · validation · errors · hash
               rate-limit · format · utils · types
-infra/        docker-compose (n8n) + cloudflared tunnel config
 n8n/          LLM prompt+schema, importable workflow JSON
 scripts/      build-n8n-workflow.mjs (regenerate workflow JSON)
 supabase/     migrations/0001_init.sql (schema + RLS + storage policies)
@@ -69,44 +66,62 @@ npm run dev          # http://localhost:3000
 ```
 
 Sign in with `demo@calllens.local` / `calllens`, upload one of the
-`samples/*.txt` transcripts, and explore the report.
-
-Re-running the same file returns the cached result instantly (SHA-256
-idempotency — the LLM is never re-billed).
+`samples/*.txt` transcripts, and explore the report. Re-running the same file
+returns the cached result instantly (SHA-256 idempotency — the LLM is never
+re-billed).
 
 ## Going live
 
-1. **Supabase**: create project, run `supabase/migrations/0001_init.sql`,
-   copy `.env.example` → `.env.local`, fill `NEXT_PUBLIC_SUPABASE_URL`,
-   `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`.
-2. **n8n + Gemini**: `docker compose -f infra/docker-compose.yml up -d`,
-   open `http://127.0.0.1:5678`, import
-   `n8n/CALLLENS_ANALYZE_CONVERSATION.json`, then paste the webhook secret
-   and Gemini key into the two Set nodes (see `n8n/LLM_PROMPT_AND_SCHEMA.md`
-   for the full contract). Fill `N8N_WEBHOOK_URL`, `N8N_WEBHOOK_SECRET`,
-   `GEMINI_API_KEY`.
-3. **(Optional)** `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` for
-   distributed rate limiting; otherwise an in-memory limiter is used
-   (6 analyses / 10 min per user, cached hits exempt).
-4. `npm run build && npm start`.
+### 1. Supabase (database + auth)
 
-The Cloudflare-tunnel profile (`--profile tunnel`) exposes n8n to the
-public webhook URL without opening inbound ports.
+1. Create a project; run `supabase/migrations/0001_init.sql` (tables, RLS,
+   storage bucket, and the trigger that auto-creates a `profiles` row for every
+   new sign-up).
+2. Authentication → Providers → Email: **disable "Confirm email"** so new
+   accounts can sign in immediately (or keep it on — the app shows a
+   "check your email" screen).
+3. Copy `.env.example` → `.env.local`, fill `NEXT_PUBLIC_SUPABASE_URL`,
+   `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`.
+
+### 2. n8n Cloud + Gemini
+
+1. Create a free n8n Cloud instance (`<your-sub>.app.n8n.cloud`).
+2. **Import the workflow** — either:
+   - **Recommended:** run `node scripts/build-n8n-workflow.mjs`, then patch the
+     two placeholders in `n8n/CALLLENS_ANALYZE_CONVERSATION.json`
+     (`PASTE_N8N_WEBHOOK_SECRET_HERE` → your secret, `PASTE_GEMINI_API_KEY_HERE`
+     → your Gemini key) and import into n8n; or
+   - import the JSON as-is and open the **Config** Code node → set
+     `N8N_WEBHOOK_SECRET` and `GEMINI_API_KEY` to the real values.
+3. Activate the workflow (toggle). Test:
+   `curl -X POST https://<your-sub>.app.n8n.cloud/webhook/calllens-analyze -H "Content-Type: application/json" -d '{}'`
+   → expect a 401-style rejection (proves it's live), and a valid analysis JSON
+   with a correctly HMAC-signed request.
+4. In `.env.local`: `N8N_WEBHOOK_URL=https://<your-sub>.app.n8n.cloud/webhook/calllens-analyze`
+   and `N8N_WEBHOOK_SECRET=<exact same secret as in the Config node>`.
+
+### 3. Vercel
+
+Set the same env vars in the Vercel project (plus `AUTH_SECRET` — a strong
+value, identical across deploys). No local n8n or tunnel needed — the app only
+talks to the public n8n webhook.
 
 ## Security notes
 
 - Browser → server only; `lib/n8n.ts` signs every webhook request with
   HMAC-SHA256 (`N8N_WEBHOOK_SECRET`); n8n verifies it in a Code node and
-  rejects invalid signatures with 401.
+  rejects invalid signatures.
 - Zod validation on both sides of the n8n boundary (schema in
   `n8n/LLM_PROMPT_AND_SCHEMA.md`), plus re-validation before persist.
 - RLS-enabled Postgres schema; storage buckets locked to the uploader.
-- Security headers via `next.config.mjs`; `AUTH_SECRET` for cookie signing
-  (demo fallback exists, never use it in production).
+- Security headers via `next.config.mjs`; `AUTH_SECRET` for cookie signing.
 
 ## Known limitations
 
 - `npm run dev` occasionally crashes its own error logger on 500s (Next.js
   inspect quirk on Windows); `npm run build && npm start` is stable.
-- Analysis is synchronous today; the `/api/n8n-callback` + status route
-  scaffold supports async fallback.
+- Analysis is synchronous; on Vercel the function must run long enough for
+  Gemini (export `maxDuration` in `app/api/analyze/route.ts`; Hobby's 10 s cap
+  may be too tight — Pro recommended).
+- Rate limiting falls back to an in-memory limiter unless Upstash is set
+  (6 analyses / 10 min per user, cached hits exempt).
