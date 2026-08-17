@@ -143,6 +143,33 @@ interface RawCall {
   status: number;
   body: unknown;
   text: string;
+  retryAfterMs: number | null;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * How long Groq wants us to wait before retrying.
+ *
+ * The free tier's 8k tokens/minute budget refills continuously, so a 429 is
+ * usually only a few seconds from clearing — the API says so in both the
+ * `retry-after` header and the error text ("Please try again in 3.097s").
+ * Honouring that turns a burst of uploads into slightly slower successes
+ * instead of silent heuristic fallbacks.
+ */
+function parseRetryAfterMs(res: Response, body: unknown): number | null {
+  const header = res.headers.get('retry-after');
+  if (header) {
+    const secs = Number(header);
+    if (Number.isFinite(secs) && secs >= 0) return Math.ceil(secs * 1000);
+  }
+  const msg = (body as { error?: { message?: string } })?.error?.message ?? '';
+  const m = msg.match(/try again in ([\d.]+)\s*s/i);
+  if (m?.[1]) {
+    const secs = Number(m[1]);
+    if (Number.isFinite(secs)) return Math.ceil(secs * 1000);
+  }
+  return null;
 }
 
 async function callGroq(
@@ -178,7 +205,12 @@ async function callGroq(
   } catch {
     body = null;
   }
-  return { status: res.status, body, text };
+  return {
+    status: res.status,
+    body,
+    text,
+    retryAfterMs: res.status === 429 ? parseRetryAfterMs(res, body) : null,
+  };
 }
 
 function extractContent(body: unknown): string {
@@ -205,17 +237,26 @@ export async function analyzeWithGroq(
   }
 
   const timeoutMs = opts.timeoutMs ?? env.groqTimeoutMs;
+  // A work queue rather than a fixed list, so a rate-limited attempt can be
+  // re-queued after waiting instead of burning the model downgrade on it.
   const attempts: Array<{ model: string; effort: string }> = [
     { model: contract.model, effort: contract.reasoningEffort },
     { model: contract.fallbackModel, effort: contract.fallbackReasoningEffort },
   ];
 
+  // Bounded so a persistently throttled key can't stall the request.
+  const MAX_RATE_LIMIT_WAITS = 2;
+  const MAX_WAIT_MS = 8_000;
+  let waitsUsed = 0;
+
   let lastError = 'Groq call failed.';
   let lastCode: GroqFailure = 'unknown';
 
-  for (const [i, attempt] of attempts.entries()) {
+  for (let i = 0; i < attempts.length; i++) {
+    const attempt = attempts[i];
+    if (!attempt) break;
     try {
-      const { status, body, text } = await callGroq(
+      const { status, body, text, retryAfterMs } = await callGroq(
         attempt.model,
         attempt.effort,
         turns,
@@ -228,7 +269,26 @@ export async function analyzeWithGroq(
           text.slice(0, 200);
         lastError = `Groq ${status}: ${apiMsg}`;
         lastCode = status >= 500 || status === 429 ? 'unreachable' : 'invalid_output';
-        // Retry on the smaller model for model/rate/server errors only.
+
+        // The free tier's token budget refills continuously, so a 429 usually
+        // clears in a couple of seconds. Waiting it out beats dropping to a
+        // keyword-based heuristic — which is what a burst of uploads used to do.
+        if (
+          status === 429 &&
+          retryAfterMs !== null &&
+          retryAfterMs <= MAX_WAIT_MS &&
+          waitsUsed < MAX_RATE_LIMIT_WAITS
+        ) {
+          waitsUsed++;
+          console.warn(
+            `[groq] ${attempt.model} rate-limited; waiting ${retryAfterMs}ms then retrying`
+          );
+          await sleep(retryAfterMs + 250);
+          i--; // retry the same attempt
+          continue;
+        }
+
+        // Otherwise fall through to the smaller/cheaper model.
         const retryable = status === 404 || status === 429 || status >= 500;
         if (retryable && i < attempts.length - 1) {
           console.warn(
