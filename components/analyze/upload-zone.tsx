@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, useTransition } from 'react';
+import { useRef, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { Check, FileText, Loader2, UploadCloud, X } from 'lucide-react';
 import { cn, formatBytes } from '@/lib/utils';
@@ -17,22 +17,39 @@ const STAGES = [
   { key: 'insights', label: 'Preparing insights' },
 ];
 
+const FORMAT_LABELS: Record<string, string> = {
+  labeled: 'labeled dialogue',
+  timestamped: 'timestamped transcript',
+  caption: 'SRT captions',
+  csv: 'CSV/TSV export',
+  unlabeled_turns: 'unlabeled turns',
+  unlabeled_prose: 'plain prose',
+};
+
+interface AnalyzeResponse {
+  conversationId: string;
+  status: string;
+  cached?: boolean;
+  detectedFormat?: string;
+  turnCount?: number;
+  truncatedTurns?: number;
+  engine?: string;
+  model?: string | null;
+  latencyMs?: number;
+  degraded?: boolean;
+}
+
 export function UploadZone() {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
-  const pollingRef = useRef(false);
   const [file, setFile] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
   const [cached, setCached] = useState(false);
+  const [summary, setSummary] = useState<AnalyzeResponse | null>(null);
   const [stageIdx, setStageIdx] = useState(-1);
-  const [polling, setPolling] = useState(false);
   const [pending, startTransition] = useTransition();
-
-  useEffect(() => () => {
-    pollingRef.current = false;
-  }, []);
 
   function pick(f: File | undefined | null) {
     setLocalError(null);
@@ -55,103 +72,51 @@ export function UploadZone() {
   }
 
   function submit() {
-    if (!file || pending || polling) return;
+    if (!file || pending) return;
     setServerError(null);
     setCached(false);
+    setSummary(null);
     setStageIdx(0);
-    setPolling(true);
-    pollingRef.current = true;
 
     const form = new FormData();
     form.append('file', file);
 
     startTransition(async () => {
-      // Synchronous feedback for the first beat, then the server either returns
-      // the result (cached / demo) or a 202 + we poll for the async job.
+      // The request is synchronous now (n8n answers in ~5s), so the stage list
+      // is purely a progress affordance. It advances on a timer and stops on
+      // the real response — no polling, no job ids, no 150s deadline.
       const timer = setInterval(() => {
         setStageIdx((i) => Math.min(i + 1, STAGES.length - 1));
-      }, 650);
+      }, 1100);
 
       let res: Response;
       try {
         res = await fetch('/api/analyze', { method: 'POST', body: form });
       } catch {
         clearInterval(timer);
-        stopPolling();
-        setServerError(
-          'Analysis service is temporarily unavailable. Please try again.'
-        );
+        setStageIdx(-1);
+        setServerError('Could not reach the server. Check your connection and retry.');
         return;
       }
       clearInterval(timer);
-      const data = await res.json().catch(() => ({}));
+      const data = (await res.json().catch(() => ({}))) as Partial<AnalyzeResponse> & {
+        error?: string;
+      };
 
       if (!res.ok) {
-        stopPolling();
+        setStageIdx(-1);
         setServerError(data?.error ?? 'Something went wrong. Please retry.');
         return;
       }
 
-      if (data?.status === 'done') {
-        // Cached hit or local demo — report is ready immediately.
-        setStageIdx(STAGES.length - 1);
-        stopPolling();
-        setTimeout(() => {
-          router.push(`/reports/${data.conversationId}`);
-          router.refresh();
-        }, 450);
-        return;
-      }
-
-      // status === 'processing' (202) — poll until n8n calls the callback.
-      pollStatus(String(data.conversationId));
-    });
-  }
-
-  function stopPolling() {
-    pollingRef.current = false;
-    setPolling(false);
-  }
-
-  async function pollStatus(jobId: string) {
-    const deadline = Date.now() + 150_000;
-    const tick = async () => {
-      if (!pollingRef.current) return;
-      if (Date.now() > deadline) {
-        stopPolling();
-        setServerError(
-          'Analysis is taking longer than expected. Check the Reports page shortly — it will appear when ready.'
-        );
-        return;
-      }
-      let r: Response;
-      try {
-        r = await fetch(`/api/analyze/status/${jobId}`);
-      } catch {
-        stopPolling();
-        setServerError('Analysis service is temporarily unavailable.');
-        return;
-      }
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        stopPolling();
-        setServerError(d.error ?? 'Something went wrong. Please retry.');
-        return;
-      }
-      if (d.status === 'done') {
-        stopPolling();
-        router.push(`/reports/${jobId}`);
+      setStageIdx(STAGES.length - 1);
+      setCached(Boolean(data.cached));
+      setSummary(data as AnalyzeResponse);
+      setTimeout(() => {
+        router.push(`/reports/${data.conversationId}`);
         router.refresh();
-        return;
-      }
-      if (d.status === 'failed') {
-        stopPolling();
-        setServerError('The analysis failed. Please try again.');
-        return;
-      }
-      setTimeout(tick, 2000);
-    };
-    setTimeout(tick, 1500);
+      }, 550);
+    });
   }
 
   return (
@@ -229,30 +194,47 @@ export function UploadZone() {
                 </button>
               </div>
 
-              {(localError || serverError) && (
-                <p role="alert" className="text-sm text-destructive">
-                  {localError ?? serverError}
-                </p>
-              )}
               {cached && (
                 <p className="text-sm text-muted-foreground">
                   This file was analyzed before — showing the saved result
                   instead of re-running the pipeline.
                 </p>
               )}
-
-              {polling ? (
-                <div className="flex items-center gap-3 rounded-lg border border-border bg-secondary/40 px-4 py-4 text-sm">
-                  <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                  <div>
-                    <p className="font-medium">Analyzing your transcript…</p>
-                    <p className="text-xs text-muted-foreground">
-                      Running in the background — this usually takes a few
-                      seconds.
+              {summary && !cached && (
+                <div className="space-y-1 text-xs text-muted-foreground">
+                  {summary.detectedFormat && (
+                    <p>
+                      Detected{' '}
+                      <span className="font-medium text-foreground">
+                        {FORMAT_LABELS[summary.detectedFormat] ?? summary.detectedFormat}
+                      </span>
+                      {typeof summary.turnCount === 'number' &&
+                        ` — ${summary.turnCount} turns extracted`}
+                      {typeof summary.truncatedTurns === 'number' &&
+                        summary.truncatedTurns > 0 &&
+                        ` (${summary.truncatedTurns} further turns were not analyzed)`}
+                      .
                     </p>
-                  </div>
+                  )}
+                  {summary.engine && (
+                    <p>
+                      Analyzed via{' '}
+                      <span className="font-medium text-foreground">
+                        {summary.engine === 'n8n'
+                          ? `n8n → ${summary.model ?? 'Groq'}`
+                          : summary.engine === 'groq-direct'
+                            ? `direct Groq fallback (${summary.model ?? 'Groq'})`
+                            : 'heuristic fallback — no LLM available'}
+                      </span>
+                      {typeof summary.latencyMs === 'number' &&
+                        ` in ${(summary.latencyMs / 1000).toFixed(1)}s`}
+                      .
+                    </p>
+                  )}
                 </div>
-              ) : stageIdx >= 0 ? (
+              )}
+
+              {stageIdx >= 0 ? (
                 <div className="space-y-2.5">
                   {STAGES.map((s, i) => {
                     const state =
@@ -285,6 +267,15 @@ export function UploadZone() {
                 </Button>
               )}
             </div>
+          )}
+
+          {/* Outside the file/no-file branches: a rejected drag-drop leaves
+              `file` null, and an error rendered only in the has-file branch
+              would never be seen. */}
+          {(localError || serverError) && (
+            <p role="alert" className="mt-4 text-sm text-destructive">
+              {localError ?? serverError}
+            </p>
           )}
 
           <input

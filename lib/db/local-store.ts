@@ -13,10 +13,13 @@ import type {
   AnalysisDetail,
   CreateAnalysisInput,
   CreateConversationInput,
+  DeleteResult,
+  ReportFilter,
+  ReportMetadataPatch,
+  ReportPage,
   ReportSummary,
   Store,
 } from '@/lib/db/store';
-import { mode } from '@/lib/config';
 
 // Local demo store — a single JSON file under .local-store/db.json.
 // Selected automatically when Supabase isn't configured. Good enough for a
@@ -77,6 +80,8 @@ class LocalStore implements Store {
       storage_path: input.storagePath,
       status: 'processing',
       created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      tags: [],
     };
     db.conversations.push(conv);
     await persist(db);
@@ -102,11 +107,20 @@ class LocalStore implements Store {
     );
   }
 
-  async createAnalysis(input: CreateAnalysisInput) {
+  async replaceAnalysis(input: CreateAnalysisInput) {
     const db = await load();
     const r = input.result;
     const id = randomUUID();
     const nowISO = new Date().toISOString();
+
+    // Mirror the Supabase 1:1 constraint: drop any prior analysis (and its
+    // sentences) so a re-run updates in place instead of accumulating rows.
+    const stale = db.analyses.filter((a) => a.conversation_id === input.conversationId);
+    if (stale.length > 0) {
+      const staleIds = new Set(stale.map((a) => a.id));
+      db.analyses = db.analyses.filter((a) => !staleIds.has(a.id));
+      db.sentences = db.sentences.filter((s) => !staleIds.has(s.analysis_id));
+    }
 
     const analysis: Analysis = {
       id,
@@ -127,11 +141,15 @@ class LocalStore implements Store {
       agent_professionalism: r.agent.professionalism,
       raw_json: r,
       created_at: nowISO,
+      engine: input.engine ?? null,
+      model: input.model ?? null,
+      latency_ms: input.latencyMs ?? null,
+      degraded: input.degraded ?? false,
     };
     db.analyses.push(analysis);
 
     const sentenceRows: SentenceRow[] = r.sentences.map((s) => ({
-      id: db!.nextSentenceId++,
+      id: db.nextSentenceId++,
       analysis_id: id,
       seq: s.seq,
       speaker: s.speaker,
@@ -140,6 +158,7 @@ class LocalStore implements Store {
       score: s.score,
       confidence: s.confidence,
       emotion: s.emotion,
+      evidence: s.evidence ?? null,
     }));
     db.sentences.push(...sentenceRows);
 
@@ -162,31 +181,113 @@ class LocalStore implements Store {
     return { analysis, sentences };
   }
 
-  async listReports(userId: string, limit = 10, offset = 0) {
+  private async summaries(userId: string): Promise<ReportSummary[]> {
     const db = await load();
-    const userConvs = db.conversations
+    return db.conversations
       .filter((c) => c.user_id === userId)
-      .sort((a, b) => b.created_at.localeCompare(a.created_at));
-    const slice = userConvs.slice(offset, offset + limit);
-    return slice.map<ReportSummary>((c) => {
-      const a = db.analyses.find((an) => an.conversation_id === c.id);
-      return {
-        conversationId: c.id,
-        analysisId: a?.id ?? null,
-        fileName: c.file_name,
-        status: c.status,
-        overallSentiment: (a?.overall_sentiment as SentimentLabel) ?? null,
-        overallScore: a?.overall_score ?? null,
-        resolutionStatus: a?.resolution_status ?? null,
-        escalationRisk: a?.escalation_risk ?? null,
-        createdAt: c.created_at,
-      };
-    });
+      .map<ReportSummary>((c) => {
+        const a = db.analyses.find((an) => an.conversation_id === c.id);
+        return {
+          conversationId: c.id,
+          analysisId: a?.id ?? null,
+          fileName: c.file_name,
+          title: c.title ?? null,
+          agentName: c.agent_name ?? null,
+          tags: c.tags ?? [],
+          status: c.status,
+          overallSentiment: (a?.overall_sentiment as SentimentLabel) ?? null,
+          overallScore: a?.overall_score ?? null,
+          resolutionStatus: a?.resolution_status ?? null,
+          escalationRisk: a?.escalation_risk ?? null,
+          engine: a?.engine ?? null,
+          degraded: a?.degraded ?? false,
+          createdAt: c.created_at,
+          updatedAt: c.updated_at ?? c.created_at,
+        };
+      });
   }
 
-  async countReports(userId: string) {
+  async listReports(userId: string, filter: ReportFilter = {}): Promise<ReportPage> {
+    const limit = Math.min(100, Math.max(1, filter.limit ?? 10));
+    const offset = Math.max(0, filter.offset ?? 0);
+    let items = await this.summaries(userId);
+
+    if (filter.sentiment && filter.sentiment !== 'all') {
+      items = items.filter((r) => r.overallSentiment === filter.sentiment);
+    }
+    const q = filter.q?.trim().toLowerCase();
+    if (q) {
+      items = items.filter((r) =>
+        [r.title, r.fileName, r.agentName]
+          .filter((v): v is string => Boolean(v))
+          .some((v) => v.toLowerCase().includes(q))
+      );
+    }
+
+    switch (filter.sort) {
+      case 'oldest':
+        items.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        break;
+      case 'score_desc':
+        items.sort((a, b) => (b.overallScore ?? -1) - (a.overallScore ?? -1));
+        break;
+      case 'score_asc':
+        items.sort((a, b) => (a.overallScore ?? -1) - (b.overallScore ?? -1));
+        break;
+      default:
+        items.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    }
+
+    // Count BEFORE slicing so pagination reflects the filtered total.
+    return { items: items.slice(offset, offset + limit), total: items.length };
+  }
+
+  async listAllForExport(userId: string): Promise<ReportSummary[]> {
+    const items = await this.summaries(userId);
+    return items.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async updateConversationMeta(
+    userId: string,
+    conversationId: string,
+    patch: ReportMetadataPatch
+  ): Promise<Conversation | null> {
     const db = await load();
-    return db.conversations.filter((c) => c.user_id === userId).length;
+    const conv = db.conversations.find(
+      (c) => c.id === conversationId && c.user_id === userId
+    );
+    if (!conv) return null;
+    if (patch.title !== undefined) conv.title = patch.title;
+    if (patch.agentName !== undefined) conv.agent_name = patch.agentName;
+    if (patch.customerName !== undefined) conv.customer_name = patch.customerName;
+    if (patch.tags !== undefined) conv.tags = patch.tags;
+    if (patch.notes !== undefined) conv.notes = patch.notes;
+    conv.updated_at = new Date().toISOString();
+    await persist(db);
+    return conv;
+  }
+
+  async deleteConversations(userId: string, ids: string[]): Promise<DeleteResult> {
+    const db = await load();
+    const target = db.conversations.filter(
+      (c) => c.user_id === userId && ids.includes(c.id)
+    );
+    if (target.length === 0) return { deleted: 0, storagePaths: [] };
+
+    const convIds = new Set(target.map((c) => c.id));
+    const analysisIds = new Set(
+      db.analyses.filter((a) => convIds.has(a.conversation_id)).map((a) => a.id)
+    );
+
+    db.conversations = db.conversations.filter((c) => !convIds.has(c.id));
+    db.analyses = db.analyses.filter((a) => !convIds.has(a.conversation_id));
+    db.sentences = db.sentences.filter((s) => !analysisIds.has(s.analysis_id));
+    await persist(db);
+
+    return {
+      deleted: target.length,
+      storagePaths: target.map((c) => c.storage_path).filter(Boolean),
+    };
   }
 }
 
@@ -195,6 +296,3 @@ export function getLocalStore(): Store {
   if (!instance) instance = new LocalStore();
   return instance;
 }
-
-// Suppress unused-import warning in configs where mode isn't read here directly.
-void mode;

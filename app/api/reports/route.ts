@@ -1,38 +1,40 @@
 import 'server-only';
 import { NextRequest } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
-import { getStore } from '@/lib/db/store';
+import { getStore, type ReportFilter, type ReportSort } from '@/lib/db/store';
 import { Errors, json } from '@/lib/errors';
 
-// GET /api/reports?limit=&offset=&sentiment=positive|neutral|negative
+export const dynamic = 'force-dynamic';
+
+const SENTIMENTS = new Set(['all', 'positive', 'neutral', 'negative']);
+const SORTS = new Set<ReportSort>(['newest', 'oldest', 'score_desc', 'score_asc']);
+
+// GET /api/reports?limit=&offset=&sentiment=&q=&sort=
+//
+// Filtering, searching, sorting and paging are all pushed into the store (and
+// from there into PostgREST). The previous implementation always fetched 100
+// rows and sliced them in JS, so offset > 100 returned nothing and the total
+// was wrong whenever a sentiment filter was active.
 export async function GET(req: NextRequest) {
   const user = await getCurrentUser();
   if (!user) return json({ error: Errors.unauthorized }, 401);
 
-  const url = req.nextUrl;
-  const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit') ?? 10)));
-  const offset = Math.max(0, Number(url.searchParams.get('offset') ?? 0));
-  const sentiment = (url.searchParams.get('sentiment') ?? 'all') as string;
+  const params = req.nextUrl.searchParams;
+  const rawSentiment = params.get('sentiment') ?? 'all';
+  const rawSort = params.get('sort') ?? 'newest';
 
-  const store = getStore();
-  // Fetch a bigger page than needed so we can client-filter by sentiment cheaply;
-  // for the assignment scale this is fine and avoids more SQL plumbing.
-  const items = await store.listReports(user.id, 100, 0);
-  const filtered =
-    sentiment === 'all'
-      ? items
-      : items.filter((r) => r.overallSentiment === sentiment);
+  const filter: ReportFilter = {
+    limit: Math.min(50, Math.max(1, Number(params.get('limit') ?? 10) || 10)),
+    offset: Math.max(0, Number(params.get('offset') ?? 0) || 0),
+    sentiment: SENTIMENTS.has(rawSentiment)
+      ? (rawSentiment as ReportFilter['sentiment'])
+      : 'all',
+    sort: SORTS.has(rawSort as ReportSort) ? (rawSort as ReportSort) : 'newest',
+  };
+  const q = params.get('q')?.trim();
+  if (q) filter.q = q.slice(0, 100);
 
-  const total = await store.countReports(user.id);
-  const page = filtered.slice(offset, offset + limit);
+  const { items, total } = await getStore().listReports(user.id, filter);
 
-  return json(
-    {
-      items: page,
-      total: sentiment === 'all' ? total : filtered.length,
-      limit,
-      offset,
-    },
-    200
-  );
+  return json({ items, total, limit: filter.limit, offset: filter.offset }, 200);
 }

@@ -1,5 +1,17 @@
-// Generates n8n/CALLLENS_ANALYZE_CONVERSATION.json — the importable n8n
-// workflow. Run with: node scripts/build-n8n-workflow.mjs
+// Generates the importable n8n workflow. Run with:
+//   node scripts/build-n8n-workflow.mjs
+//
+// Emits TWO files:
+//   n8n/CALLLENS_ANALYZE_CONVERSATION.json        placeholders — safe to commit
+//   n8n/CALLLENS_ANALYZE_CONVERSATION.local.json  real secrets — gitignored
+// Import the .local.json into n8n Cloud so there is nothing to paste by hand.
+// (The previous single-file approach meant the committed workflow still said
+// PASTE_N8N_WEBHOOK_SECRET_HERE, which is exactly what was live in n8n Cloud —
+// every signed request from the app was rejected.)
+//
+// The prompt, schema and model all come from lib/analysis-contract.json, which
+// lib/groq.ts also reads. That is deliberate: the n8n path and the in-app
+// fallback path are provably the same prompt and cannot drift.
 //
 // n8n 2.x compatibility notes (do not regress these):
 //  - Secrets live in ONE chained Code node ("Config"): chained Code nodes are
@@ -8,35 +20,40 @@
 //    container — they silently dropped the webhook payload.
 //  - Code nodes read secrets from the input chain, not from cross-node $() refs
 //    (refs to nodes that didn't execute throw "Node 'X' hasn't been executed").
-import { writeFileSync } from 'node:fs';
+//  - The Groq call uses require('https'), not the httpRequest node, which
+//    mangled the JSON body here.
+import { writeFileSync, readFileSync } from 'node:fs';
 
-// ── values you must paste into the Config node after import (n8n editor) ──
-// If GROQ_API_KEY is present in the shell env when this script runs, it is
-// baked straight into the generated workflow (so you can re-import without
-// touching the Config node). Otherwise a placeholder is emitted.
+const contract = JSON.parse(
+  readFileSync(new URL('../lib/analysis-contract.json', import.meta.url), 'utf8')
+);
+
 const SECRET_PLACEHOLDER = 'PASTE_N8N_WEBHOOK_SECRET_HERE';
-const KEY_PLACEHOLDER = process.env.GROQ_API_KEY || 'PASTE_GROQ_API_KEY_HERE';
+const KEY_PLACEHOLDER = 'PASTE_GROQ_API_KEY_HERE';
 
-const configCode = `
-// Single place to paste the two secrets. Code-node pass-through is reliable in
+const realSecret = process.env.N8N_WEBHOOK_SECRET || '';
+const realKey = process.env.GROQ_API_KEY || '';
+
+// ── Node source ──────────────────────────────────────────────────────────────
+
+const configCode = (secret, key) => `
+// Single place for the two secrets. Code-node pass-through is reliable in
 // n8n 2.x (unlike Set nodes, which dropped the payload in this setup).
 const inp = $json || {};
-return [{ json: { ...inp, N8N_WEBHOOK_SECRET: '${SECRET_PLACEHOLDER}', GROQ_API_KEY: '${KEY_PLACEHOLDER}' } }];
+return [{ json: { ...inp, N8N_WEBHOOK_SECRET: '${secret}', GROQ_API_KEY: '${key}' } }];
 `;
 
 const verifyCode = `
 const crypto = require('crypto');
-// HMAC-SHA256 verification (build plan §8.5). The secret arrives via the
-// "Webhook Secret" Set node chained upstream (field N8N_WEBHOOK_SECRET).
-// JSON.stringify preserves the key order of the received body, so it matches
-// the string Next.js signed.
+// HMAC-SHA256 verification. The secret arrives from the "Config" node chained
+// upstream. JSON.stringify preserves the key order of the received body, so it
+// reproduces the exact string Next.js signed in lib/n8n.ts.
 const inp = $input.first().json || {};
 const secret = String(inp.N8N_WEBHOOK_SECRET || inp.webhookSecret || '');
 const headers = inp.headers || {};
 const sig = String(headers['x-signature'] || headers['X-Signature'] || '');
 const body = inp.body;
 // n8n 2.x may deliver the body already parsed (object) or as the raw string.
-// JSON.stringify on the parsed object reproduces the exact bytes Next.js signed.
 const bodyStr = typeof body === 'string' ? body : JSON.stringify(body || {});
 const computed = crypto.createHmac('sha256', secret).update(bodyStr).digest('hex');
 const valid = sig.length > 0 && secret.length > 0 && sig === computed;
@@ -46,158 +63,81 @@ return [{ json: { ...inp, valid: valid } }];
 const buildCode = `
 const inp = $input.first().json || {};
 const apiKey = String(inp.GROQ_API_KEY || inp.apiKey || '');
-const payload = inp.payload || inp.body || {};
+// The signed payload is nested under .body on the webhook item — reading it off
+// the root was why callbackUrl used to come out empty. Mirror the string/object
+// tolerance of the Verify Signature node.
+const rawBody = inp.body;
+let payload = {};
+try {
+  payload = typeof rawBody === 'string' ? JSON.parse(rawBody) : (rawBody || {});
+} catch (e) {
+  payload = {};
+}
 const transcript = Array.isArray(payload.transcript) ? payload.transcript : [];
-const lines = transcript.map(function (t) { return t.speaker + ': ' + t.text; }).join('\\n');
+let lines = transcript.map(function (t) { return t.speaker + ': ' + t.text; }).join('\\n');
 
-// ── Structured output schema (mirrors n8n/LLM_PROMPT_AND_SCHEMA.md) ──
-const schema = {
-  type: 'object',
-  required: ['overall_sentiment', 'summary', 'intent', 'resolution', 'risk', 'customer', 'agent', 'emotions', 'important_moments', 'sentences'],
-  properties: {
-    overall_sentiment: {
-      type: 'object',
-      required: ['label', 'score', 'confidence'],
-      properties: {
-        label: { type: 'string', enum: ['positive', 'neutral', 'negative'] },
-        score: { type: 'integer', minimum: 0, maximum: 100 },
-        confidence: { type: 'number', minimum: 0, maximum: 1 }
-      }
-    },
-    summary: { type: 'string', maxLength: 500 },
-    intent: {
-      type: 'object',
-      required: ['category', 'description'],
-      properties: {
-        category: { type: 'string', maxLength: 40 },
-        description: { type: 'string', maxLength: 200 }
-      }
-    },
-    resolution: {
-      type: 'object',
-      required: ['status', 'likelihood'],
-      properties: {
-        status: { type: 'string', enum: ['resolved', 'unresolved', 'partial', 'unknown'] },
-        likelihood: { type: ['integer', 'null'], minimum: 0, maximum: 100 }
-      }
-    },
-    risk: {
-      type: 'object',
-      required: ['escalation'],
-      properties: {
-        escalation: { type: ['integer', 'null'], minimum: 0, maximum: 100 }
-      }
-    },
-    customer: {
-      type: 'object',
-      required: ['frustration', 'satisfaction', 'effort'],
-      properties: {
-        frustration: { type: ['string', 'null'], enum: ['low', 'medium', 'high'] },
-        satisfaction: { type: ['integer', 'null'], minimum: 0, maximum: 100 },
-        effort: { type: ['string', 'null'], enum: ['low', 'medium', 'high'] }
-      }
-    },
-    agent: {
-      type: 'object',
-      required: ['empathy', 'clarity', 'professionalism'],
-      properties: {
-        empathy: { type: ['integer', 'null'], minimum: 0, maximum: 100 },
-        clarity: { type: ['integer', 'null'], minimum: 0, maximum: 100 },
-        professionalism: { type: ['integer', 'null'], minimum: 0, maximum: 100 }
-      }
-    },
-    emotions: {
-      type: 'array',
-      maxItems: 5,
-      items: {
-        type: 'object',
-        required: ['label', 'intensity'],
-        properties: {
-          label: { type: 'string', maxLength: 40 },
-          intensity: { type: 'integer', minimum: 0, maximum: 100 }
-        }
-      }
-    },
-    important_moments: {
-      type: 'array',
-      maxItems: 6,
-      items: {
-        type: 'object',
-        required: ['seq', 'speaker', 'event'],
-        properties: {
-          seq: { type: 'integer', minimum: 1 },
-          speaker: { type: 'string', maxLength: 40 },
-          event: { type: 'string', maxLength: 200 }
-        }
-      }
-    },
-    sentences: {
-      type: 'array',
-      minItems: 1,
-      items: {
-        type: 'object',
-        required: ['seq', 'speaker', 'text', 'sentiment', 'score', 'confidence', 'emotion'],
-        properties: {
-          seq: { type: 'integer', minimum: 1 },
-          speaker: { type: 'string', maxLength: 40 },
-          text: { type: 'string', minLength: 1, maxLength: 2000 },
-          sentiment: { type: 'string', enum: ['positive', 'neutral', 'negative'] },
-          score: { type: 'integer', minimum: 0, maximum: 100 },
-          confidence: { type: 'number', minimum: 0, maximum: 1 },
-          emotion: { type: 'string', maxLength: 40 },
-          evidence: { type: 'string', maxLength: 200 }
-        }
-      }
-    }
-  }
-};
+// Rules text + the literal JSON schema, baked at build time from
+// lib/analysis-contract.json. Must stay byte-identical to buildSystemPrompt()
+// in lib/groq.ts. Groq's json_object mode enforces no shape, so omitting the
+// schema here makes the model invent its own keys — an earlier build did
+// exactly that and silently dropped resolution/risk/customer.
+const systemPrompt = ${JSON.stringify(
+  contract.systemPrompt +
+    '\n\nSCHEMA — your reply must be a single JSON object with EXACTLY these keys and types:\n' +
+    JSON.stringify(contract.jsonSchema)
+)};
 
-const systemPrompt = 'You are CallLens, a precise conversation-intelligence engine. You analyze call transcripts and return ONLY strict JSON matching the provided schema.\\n' +
-  'HARD RULES — these determine your quality score, never violate them:\\n' +
-  '1. Classify sentiment from MEANING and CONTEXT, not keyword matching. Example: "I am not unhappy" is NOT negative. Read the conversation, not the dictionary.\\n' +
-  '2. Any metric without direct transcript evidence -> null. NEVER guess.\\n' +
-  '3. agent.* fields (empathy, clarity, professionalism) are null unless a speaker is clearly the agent (agent, rep, support, advisor, etc.).\\n' +
-  '4. customer.* fields are null unless a customer/caller is clearly identifiable. For unlabeled transcripts (speaker unknown_1/unknown_2) never guess which side is which.\\n' +
-  '5. Do NOT expose chain-of-thought. Explanations (summary, evidence, intent.description, important_moments.event) must be short, evidence-backed sentences quoting the transcript.\\n' +
-  '6. Enums: use ONLY the allowed values in the schema. Every sentence must get a sentiment label from positive|neutral|negative.\\n' +
-  '7. Sentences: emit one object per transcript turn (seq must match the input seq numbering exactly). If you cannot split into turns, emit one object per sentence with seq incremented.\\n' +
-  '8. Sentiment score is 0-100 (50 = neutral). Confidence is 0-1.\\n' +
-  '9. important_moments: up to 6 moments that changed the conversation arc. Never invent a seq that does not exist in the transcript.\\n' +
-  '10. emotions: up to 5 aggregate emotion labels with 0-100 intensity.\\n' +
-  'Respond with the JSON object ONLY.';
+// ── Token budget (mirrors planRequest() in lib/groq.ts) ──
+// Groq admits a request only if prompt_tokens + max_completion_tokens is within
+// the tier's TPM limit — the REQUESTED total, not actual usage. A fixed 8192
+// returned HTTP 413 "Request too large" on an 11-turn transcript.
+const TPM_LIMIT = ${JSON.stringify(contract.tpmLimit)};
+const TPM_MARGIN = ${JSON.stringify(contract.tpmSafetyMargin)};
+const SYS_TOKENS = ${JSON.stringify(contract.systemPromptTokens)};
+const CHARS_PER_TOKEN = ${JSON.stringify(contract.charsPerToken)};
+const MIN_COMPLETION = ${JSON.stringify(contract.minCompletionTokens)};
+const MAX_COMPLETION = ${JSON.stringify(contract.maxCompletionTokens)};
+const MAX_USER_CHARS = ${JSON.stringify(contract.maxUserChars)};
 
-const prompt = systemPrompt + '\\n\\nTRANSCRIPT:\\n' + lines;
+let truncatedChars = 0;
+if (lines.length > MAX_USER_CHARS) {
+  truncatedChars = lines.length - MAX_USER_CHARS;
+  const cut = lines.slice(0, MAX_USER_CHARS);
+  const lastNewline = cut.lastIndexOf('\\n');
+  lines = lastNewline > 0 ? cut.slice(0, lastNewline) : cut;
+}
+const promptTokens = SYS_TOKENS + Math.ceil(lines.length / CHARS_PER_TOKEN);
+const available = TPM_LIMIT - TPM_MARGIN - promptTokens;
+const maxCompletion = Math.max(MIN_COMPLETION, Math.min(MAX_COMPLETION, available));
 
-// Groq is OpenAI-compatible and returns in ~1-3s (vs 8-15s for Gemini), which
-// keeps the whole call inside Vercel Hobby's 10s function cap. It does NOT
-// support a JSON responseSchema, so the schema lives in the system prompt and
-// the app re-validates the shape with Zod.
 const requestBody = {
-  model: 'llama-3.3-70b-versatile',
+  model: ${JSON.stringify(contract.model)},
   messages: [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: lines }
   ],
-  temperature: 0.1,
+  temperature: ${JSON.stringify(contract.temperature)},
+  reasoning_effort: ${JSON.stringify(contract.reasoningEffort)},
+  max_completion_tokens: maxCompletion,
   response_format: { type: 'json_object' }
 };
 
-// The app sends its public origin (app_url) inside the signed payload; n8n
-// calls that origin's async callback when Groq is done. This avoids hardcoding
-// the app URL in n8n.
-const appUrl = String(inp.app_url || '').replace(/\\/$/, '');
-const callbackUrl = appUrl ? appUrl + '/api/analyze/callback' : '';
-
-// Carry the whole input forward so secrets + callbackUrl reach the callback
-// HTTP node after validation.
-return [{ json: { ...inp, requestBody: requestBody, conversation_id: payload.conversation_id, file_name: payload.file_name || '', GROQ_API_KEY: apiKey, callbackUrl: callbackUrl } }];
+return [{ json: {
+  ...inp,
+  requestBody: requestBody,
+  conversation_id: payload.conversation_id,
+  file_name: payload.file_name || '',
+  turnCount: transcript.length,
+  truncatedChars: truncatedChars,
+  GROQ_API_KEY: apiKey
+} }];
 `;
 
 const groqCallCode = `
 // require('https') — the n8n 2.x httpRequest node mangled JSON bodies here,
 // and Code nodes have neither global fetch nor $helpers. This sends the exact
-// bytes we built (needs NODE_FUNCTION_ALLOW_BUILTIN=crypto,https on the n8n
-// container — n8n Cloud allows all builtins by default).
+// bytes we built (needs NODE_FUNCTION_ALLOW_BUILTIN=crypto,https on a
+// self-hosted container — n8n Cloud allows all builtins by default).
 const https = require('https');
 const inp = $input.first().json || {};
 const payload = JSON.stringify(inp.requestBody || {});
@@ -205,10 +145,11 @@ let status = 0;
 let text = '';
 let parsed = null;
 await new Promise(function (resolve) {
-  const req = https.request('https://api.groq.com/openai/v1/chat/completions', {
+  const req = https.request(${JSON.stringify(contract.endpoint)}, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(payload),
       'Authorization': 'Bearer ' + String(inp.GROQ_API_KEY || '')
     }
   }, function (res) {
@@ -220,7 +161,10 @@ await new Promise(function (resolve) {
       resolve();
     });
   });
-  req.on('error', function (e) { text = String(e); resolve(); });
+  // Never outlive the app's own budget — a hung socket here would hold the
+  // caller's connection open until it timed out on its side.
+  req.setTimeout(25000, function () { req.destroy(new Error('groq socket timeout')); });
+  req.on('error', function (e) { text = String(e && e.message ? e.message : e); resolve(); });
   req.write(payload);
   req.end();
 });
@@ -229,33 +173,51 @@ return [{ json: { ...inp, httpStatus: status, groqResponse: parsed, groqRaw: tex
 
 const validateCode = `
 // Extract the JSON text from the Groq chat-completion response and parse it.
-// Routing to a 200 vs 502 response happens in the "Output Valid?" IF node.
-const item = $input.first().json;
-const data = (item && item.groqResponse) || {};
+// Routing to the 200 vs 502 Respond node happens in "Output Valid?".
+// NOTE: this variable MUST be named 'inp' — the return spreads {...inp} to carry
+// the whole chain forward. It was previously declared as 'item', which threw
+// ReferenceError and killed every execution before it could respond.
+const inp = $input.first().json || {};
+const data = inp.groqResponse || {};
 const choices = data.choices || [];
 const msg = (choices[0] && choices[0].message) || {};
 let text = typeof msg.content === 'string' ? msg.content : '';
-// Groq may (rarely) wrap JSON in markdown fences — strip them before parsing.
+
 let cleaned = text.trim();
-if (cleaned.startsWith('\`\`\`')) {
-  cleaned = cleaned.replace(/^\`\`\`(?:json)?\s*/i, '').replace(/\s*\`\`\`$/, '');
+// Groq may (rarely) wrap JSON in markdown fences — strip them before parsing.
+if (cleaned.indexOf('\\u0060\\u0060\\u0060') === 0) {
+  cleaned = cleaned.replace(/^\\u0060\\u0060\\u0060(?:json)?\\s*/i, '').replace(/\\s*\\u0060\\u0060\\u0060$/, '');
 }
+
 let result = null;
 let ok = false;
 try {
   result = JSON.parse(cleaned);
   ok = true;
 } catch (e) {
-  ok = false;
+  // gpt-oss spends part of max_completion_tokens on reasoning, so a long
+  // transcript can truncate the JSON. Salvage up to the last closing brace
+  // rather than discarding the whole analysis.
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (lastBrace > 0) {
+    try { result = JSON.parse(cleaned.slice(0, lastBrace + 1)); ok = true; } catch (e2) { ok = false; }
+  }
 }
-// Spread the input forward so callbackUrl + N8N_WEBHOOK_SECRET survive to the
-// callback HTTP node.
-return [{ json: { ...inp, ok: ok, result: result } }];
+if (ok && (!result || typeof result !== 'object')) ok = false;
+
+return [{ json: {
+  ...inp,
+  ok: ok,
+  result: result,
+  failureReason: ok ? '' : ('groq status ' + String(inp.httpStatus) + ': ' + String(inp.groqRaw || '').slice(0, 400))
+} }];
 `;
+
+// ── Graph ────────────────────────────────────────────────────────────────────
 
 const uid = (s) => s;
 
-const nodes = [
+const buildNodes = (secret, key) => [
   {
     parameters: {
       httpMethod: 'POST',
@@ -271,7 +233,7 @@ const nodes = [
     webhookId: 'calllens-analyze-webhook',
   },
   {
-    parameters: { jsCode: configCode },
+    parameters: { jsCode: configCode(secret, key) },
     id: uid('config'),
     name: 'Config',
     type: 'n8n-nodes-base.code',
@@ -284,7 +246,7 @@ const nodes = [
     name: 'Verify Signature',
     type: 'n8n-nodes-base.code',
     typeVersion: 2,
-    position: [660, 0],
+    position: [440, 0],
   },
   {
     parameters: {
@@ -305,7 +267,7 @@ const nodes = [
     name: 'Valid Signature?',
     type: 'n8n-nodes-base.if',
     typeVersion: 2,
-    position: [880, 0],
+    position: [660, 0],
   },
   {
     parameters: { jsCode: buildCode },
@@ -313,7 +275,7 @@ const nodes = [
     name: 'Build Request',
     type: 'n8n-nodes-base.code',
     typeVersion: 2,
-    position: [320, 260],
+    position: [880, -120],
   },
   {
     parameters: { jsCode: groqCallCode },
@@ -321,7 +283,7 @@ const nodes = [
     name: 'Call Groq',
     type: 'n8n-nodes-base.code',
     typeVersion: 2,
-    position: [320, 480],
+    position: [1100, -120],
   },
   {
     parameters: { jsCode: validateCode },
@@ -329,7 +291,7 @@ const nodes = [
     name: 'Validate Output',
     type: 'n8n-nodes-base.code',
     typeVersion: 2,
-    position: [320, 700],
+    position: [1320, -120],
   },
   {
     parameters: {
@@ -350,26 +312,45 @@ const nodes = [
     name: 'Output Valid?',
     type: 'n8n-nodes-base.if',
     typeVersion: 2,
-    position: [320, 920],
+    position: [1540, -120],
   },
   {
-    // Respond-and-continue: the webhook returns 202 the moment the signature
-    // checks out, then the workflow keeps running Groq in the background.
+    // The finished analysis, returned on the SAME connection the app is still
+    // holding open. No callback, no polling, no job state.
     parameters: {
       respondWith: 'json',
-      responseBody: "={{ JSON.stringify({ accepted: true, jobId: $json.conversation_id }) }}",
-      responseCode: 202,
+      responseBody:
+        "={{ JSON.stringify({ ok: true, engine: 'n8n', model: $json.requestBody.model, result: $json.result }) }}",
+      responseCode: 200,
       options: {
         responseHeaders: {
           entries: [{ name: 'Content-Type', value: 'application/json' }],
         },
       },
     },
-    id: uid('r202'),
-    name: 'Respond 202',
+    id: uid('r200'),
+    name: 'Respond 200',
     type: 'n8n-nodes-base.respondToWebhook',
     typeVersion: 1.1,
-    position: [880, 260],
+    position: [1760, -240],
+  },
+  {
+    parameters: {
+      respondWith: 'json',
+      responseBody:
+        '={{ JSON.stringify({ ok: false, error: "invalid_output", detail: $json.failureReason }) }}',
+      responseCode: 502,
+      options: {
+        responseHeaders: {
+          entries: [{ name: 'Content-Type', value: 'application/json' }],
+        },
+      },
+    },
+    id: uid('r502'),
+    name: 'Respond 502',
+    type: 'n8n-nodes-base.respondToWebhook',
+    typeVersion: 1.1,
+    position: [1760, 0],
   },
   {
     parameters: {
@@ -386,58 +367,7 @@ const nodes = [
     name: 'Respond 401',
     type: 'n8n-nodes-base.respondToWebhook',
     typeVersion: 1.1,
-    position: [1080, 260],
-  },
-  // ── Async callbacks: n8n POSTs the result (or failure) back to the app,
-  // which persists it and flips the job status. Authenticated by the shared
-  // secret header x-calllens-callback. ──
-  {
-    parameters: {
-      url: '={{ $json.callbackUrl }}',
-      method: 'POST',
-      sendHeaders: true,
-      headerParameters: {
-        parameters: [
-          { name: 'Content-Type', value: 'application/json' },
-          { name: 'x-calllens-callback', value: '={{ $json.N8N_WEBHOOK_SECRET }}' },
-        ],
-      },
-      sendBody: true,
-      contentType: 'json',
-      specifyBody: 'json',
-      jsonBody:
-        '={{ JSON.stringify({ jobId: $json.conversation_id, result: $json.result }) }}',
-      options: {},
-    },
-    id: uid('cbOk'),
-    name: 'Callback (success)',
-    type: 'n8n-nodes-base.httpRequest',
-    typeVersion: 4.2,
-    position: [120, 1140],
-  },
-  {
-    parameters: {
-      url: '={{ $json.callbackUrl }}',
-      method: 'POST',
-      sendHeaders: true,
-      headerParameters: {
-        parameters: [
-          { name: 'Content-Type', value: 'application/json' },
-          { name: 'x-calllens-callback', value: '={{ $json.N8N_WEBHOOK_SECRET }}' },
-        ],
-      },
-      sendBody: true,
-      contentType: 'json',
-      specifyBody: 'json',
-      jsonBody:
-        '={{ JSON.stringify({ jobId: $json.conversation_id, error: "invalid_output" }) }}',
-      options: {},
-    },
-    id: uid('cbErr'),
-    name: 'Callback (error)',
-    type: 'n8n-nodes-base.httpRequest',
-    typeVersion: 4.2,
-    position: [520, 1140],
+    position: [880, 160],
   },
 ];
 
@@ -449,12 +379,10 @@ const connections = {
   },
   'Valid Signature?': {
     main: [
-      [{ node: 'Respond 202', type: 'main', index: 0 }],
+      [{ node: 'Build Request', type: 'main', index: 0 }],
       [{ node: 'Respond 401', type: 'main', index: 0 }],
     ],
   },
-  // After the 202 is sent, the workflow keeps going in the background.
-  'Respond 202': { main: [[{ node: 'Build Request', type: 'main', index: 0 }]] },
   'Build Request': { main: [[{ node: 'Call Groq', type: 'main', index: 0 }]] },
   'Call Groq': { main: [[{ node: 'Validate Output', type: 'main', index: 0 }]] },
   'Validate Output': {
@@ -462,35 +390,64 @@ const connections = {
   },
   'Output Valid?': {
     main: [
-      [{ node: 'Callback (success)', type: 'main', index: 0 }],
-      [{ node: 'Callback (error)', type: 'main', index: 0 }],
+      [{ node: 'Respond 200', type: 'main', index: 0 }],
+      [{ node: 'Respond 502', type: 'main', index: 0 }],
     ],
   },
 };
 
-const workflow = {
+const buildWorkflow = (secret, key) => ({
   name: 'CALLLENS_ANALYZE_CONVERSATION',
-  nodes,
+  nodes: buildNodes(secret, key),
   connections,
-  // Imported as ACTIVE: delete the old workflow first so the webhook path
-  // (calllens-analyze) doesn't collide.
+  // Imported as ACTIVE: DELETE the old workflow first, otherwise it keeps
+  // ownership of the /webhook/calllens-analyze path and your import does
+  // nothing.
   active: true,
   settings: {},
   pinData: {},
   meta: {
-    description:
-      'CallLens async analysis pipeline: HMAC-verified webhook -> 202 accept -> Groq (llama-3.3-70b) in the background -> callback to the app with the result. Fits Vercel Hobby\'s 10s function cap. Deterministic pipeline, not an agent.',
+    description: `CallLens synchronous analysis pipeline: HMAC-verified webhook -> Groq ${contract.model} -> validated JSON returned on the same request (~4-6s). Deterministic pipeline, not an agent.`,
   },
-};
+});
 
-writeFileSync(
-  new URL('../n8n/CALLLENS_ANALYZE_CONVERSATION.json', import.meta.url),
-  JSON.stringify(workflow, null, 2)
+// ── Emit ─────────────────────────────────────────────────────────────────────
+
+const publicPath = new URL(
+  '../n8n/CALLLENS_ANALYZE_CONVERSATION.json',
+  import.meta.url
 );
-console.log('wrote n8n/CALLLENS_ANALYZE_CONVERSATION.json');
+const publicJson = JSON.stringify(
+  buildWorkflow(SECRET_PLACEHOLDER, KEY_PLACEHOLDER),
+  null,
+  2
+);
+
+// Belt and braces: never let a real key reach the committed artifact.
+if (/gsk_[A-Za-z0-9]/.test(publicJson)) {
+  throw new Error('refusing to write: a real Groq key leaked into the public workflow');
+}
+writeFileSync(publicPath, publicJson);
+console.log('wrote n8n/CALLLENS_ANALYZE_CONVERSATION.json (placeholders)');
+
+if (realSecret && realKey) {
+  writeFileSync(
+    new URL('../n8n/CALLLENS_ANALYZE_CONVERSATION.local.json', import.meta.url),
+    JSON.stringify(buildWorkflow(realSecret, realKey), null, 2)
+  );
+  console.log(
+    'wrote n8n/CALLLENS_ANALYZE_CONVERSATION.local.json (real secrets, gitignored) — import THIS one'
+  );
+} else {
+  console.warn(
+    'N8N_WEBHOOK_SECRET / GROQ_API_KEY not in env — skipped .local.json.\n' +
+      '  Run with them exported to get an import-ready file, e.g.:\n' +
+      '  node -r dotenv/config scripts/build-n8n-workflow.mjs dotenv_config_path=.env'
+  );
+}
 
 // ── structural self-check: every connection references a real node ──
-const names = new Set(nodes.map((n) => n.name));
+const names = new Set(buildNodes(SECRET_PLACEHOLDER, KEY_PLACEHOLDER).map((n) => n.name));
 for (const [from, conns] of Object.entries(connections)) {
   if (!names.has(from)) throw new Error(`connection source missing: ${from}`);
   for (const branch of conns.main) {
@@ -499,4 +456,24 @@ for (const [from, conns] of Object.entries(connections)) {
     }
   }
 }
-console.log('structural check: all nodes & connections valid');
+// Every node except the terminal Respond nodes must be reachable.
+const reachable = new Set(['Webhook']);
+let changed = true;
+while (changed) {
+  changed = false;
+  for (const [from, conns] of Object.entries(connections)) {
+    if (!reachable.has(from)) continue;
+    for (const branch of conns.main) {
+      for (const t of branch) {
+        if (!reachable.has(t.node)) {
+          reachable.add(t.node);
+          changed = true;
+        }
+      }
+    }
+  }
+}
+for (const n of names) {
+  if (!reachable.has(n)) throw new Error(`unreachable node: ${n}`);
+}
+console.log('structural check: all nodes reachable & connections valid');

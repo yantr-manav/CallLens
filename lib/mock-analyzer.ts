@@ -32,8 +32,10 @@ const EMPATHY = new Set(['sorry', 'apologize', 'understand', 'understandably', '
 const CLARITY = new Set(['sure', 'absolutely', 'here', 'step', 'let me', 'first', 'next', 'confirm', 'exactly']);
 const PROF = new Set(['thank', 'please', 'certainly', 'welcome', 'regards', 'kindly', 'gladly']);
 
-const AGENT_RE = /(agent|rep|representative|support|advisor|operator|associate|staff)/i;
-const CUSTOMER_RE = /(customer|caller|client|user)/i;
+// Exported so lib/kpi.ts infers speaker roles with the SAME rules rather than
+// growing a second, subtly-different set of regexes.
+export const AGENT_RE = /(agent|rep|representative|support|advisor|operator|associate|staff)/i;
+export const CUSTOMER_RE = /(customer|caller|client|user)/i;
 
 function words(text: string): string[] {
   return text.toLowerCase().replace(/[^a-z'\s]/g, ' ').split(/\s+/).filter(Boolean);

@@ -28,9 +28,13 @@ export async function saveRawTranscript(
       .from(BUCKET)
       .upload(objectPath, blob, {
         contentType: 'text/plain',
-        upsert: false, // unique(user_id, file_hash) already prevents dupes
+        // Overwrite rather than conflict. The path is content-addressed
+        // (userId/fileHash.txt), so a re-upload is byte-identical anyway, and
+        // matching on the exact string 'The resource already exists' was
+        // brittle — any wording change from Supabase turned a re-run into a 500.
+        upsert: true,
       });
-    if (error && error.message !== 'The resource already exists') {
+    if (error) {
       throw new Error(`storage upload: ${error.message}`);
     }
     return objectPath;
@@ -41,6 +45,28 @@ export async function saveRawTranscript(
   await fs.mkdir(path.dirname(localFile), { recursive: true });
   await fs.writeFile(localFile, content, 'utf-8');
   return objectPath;
+}
+
+/** Removes stored transcript blobs. Used when reports are deleted. */
+export async function deleteRawTranscripts(objectPaths: string[]): Promise<void> {
+  const paths = objectPaths.filter(Boolean);
+  if (paths.length === 0) return;
+
+  if (mode.supabaseConfigured) {
+    const client = await getServerClient();
+    if (!client) return;
+    const { error } = await client.storage.from(BUCKET).remove(paths);
+    // Best-effort: the DB rows are already gone, and an orphaned blob is far
+    // less bad than failing the user's delete.
+    if (error) console.error('[storage] remove failed:', error.message);
+    return;
+  }
+
+  await Promise.all(
+    paths.map((p) =>
+      fs.rm(path.join(LOCAL_BLOB_DIR, p), { force: true }).catch(() => undefined)
+    )
+  );
 }
 
 export async function readRawTranscript(

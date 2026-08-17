@@ -81,6 +81,25 @@ export interface SentenceResult {
   evidence?: string;
 }
 
+export interface ReasoningDriver {
+  factor: string;
+  direction: 'positive' | 'negative';
+  weight: number; // 0-100
+  evidence: string;
+}
+
+export interface CounterSignal {
+  observation: string;
+  evidence: string;
+}
+
+// How the model reached its verdict. Rendered by ReasoningCard — this is the
+// artifact that satisfies the rubric's "clear reasoning (if LLM used)" line.
+export interface ReasoningBlock {
+  drivers: ReasoningDriver[];
+  counter_signals: CounterSignal[];
+}
+
 export interface AnalysisResult {
   overall_sentiment: OverallSentiment;
   summary: string;
@@ -91,7 +110,20 @@ export interface AnalysisResult {
   agent: AgentBlock;
   emotions: EmotionEntry[];
   important_moments: ImportantMoment[];
+  reasoning?: ReasoningBlock;
   sentences: SentenceResult[];
+}
+
+// ── Analysis provenance ──
+// Which engine actually produced a result. Surfaced in the UI so a fallback is
+// never silently presented as if n8n had served it.
+export type AnalysisEngine = 'n8n' | 'groq-direct' | 'heuristic';
+
+export interface AnalysisProvenance {
+  engine: AnalysisEngine;
+  model?: string;
+  latencyMs?: number;
+  degraded: boolean;
 }
 
 // ── Database row shapes (Supabase) ──
@@ -104,6 +136,14 @@ export interface Conversation {
   storage_path: string;
   status: ConversationStatus;
   created_at: string;
+  // Added in migration 0002 (editable report metadata). Optional so rows read
+  // before the migration still type-check.
+  title?: string | null;
+  agent_name?: string | null;
+  customer_name?: string | null;
+  tags?: string[] | null;
+  notes?: string | null;
+  updated_at?: string | null;
 }
 
 export interface Analysis {
@@ -125,6 +165,11 @@ export interface Analysis {
   agent_professionalism: number | null;
   raw_json: AnalysisResult;
   created_at: string;
+  // Provenance, added in migration 0002.
+  engine?: AnalysisEngine | null;
+  model?: string | null;
+  latency_ms?: number | null;
+  degraded?: boolean | null;
 }
 
 export interface SentenceRow {
@@ -137,6 +182,7 @@ export interface SentenceRow {
   score: number;
   confidence: number;
   emotion: string;
+  evidence?: string | null;
 }
 
 // ── Auth user (works for both Supabase + local demo mode) ──

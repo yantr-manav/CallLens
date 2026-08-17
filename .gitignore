@@ -17,6 +17,9 @@ infra/.env
 # n8n local data (never commit workflow credentials/data dumps)
 n8n_data/
 infra/n8n_data/
+# Generated workflow with REAL secrets baked in (import this one into n8n Cloud).
+# The committed CALLLENS_ANALYZE_CONVERSATION.json keeps placeholders.
+n8n/*.local.json
 
 # supabase local
 .supabase/

@@ -1,29 +1,36 @@
 import 'server-only';
 import { env, mode } from '@/lib/config';
-import {
-  analyzePayloadSchema,
-  analysisResultSchema,
-  type AnalysisResultSchemaType,
-} from '@/lib/validation';
-import type { AnalyzePayload } from '@/lib/validation';
-import type { AnalysisResult } from '@/lib/types';
+import { analyzePayloadSchema } from '@/lib/validation';
+import { normalizeAnalysisResult } from '@/lib/normalize-result';
+import type { AnalyzePayload, AnalysisResultSchemaType } from '@/lib/validation';
 
-// ── n8n webhook caller — the ONLY boundary where Next.js talks to n8n.
-// The browser never sees N8N_WEBHOOK_URL. The request is HMAC-signed with
-// N8N_WEBHOOK_SECRET; n8n's first node validates the signature and rejects
-// anything that doesn't match (build plan §8.5). ──
+// ── n8n webhook caller — the ONLY boundary where Next.js talks to n8n ──
+//
+// The browser never sees N8N_WEBHOOK_URL. The request is HMAC-SHA256 signed
+// with N8N_WEBHOOK_SECRET; n8n's Verify Signature node recomputes the digest
+// over the received body and rejects anything that doesn't match.
+//
+// ARCHITECTURE NOTE — this is a SYNCHRONOUS call.
+// The previous design fired the job at n8n, took a 202, and waited for n8n to
+// POST the result back to /api/analyze/callback. That could never work in local
+// development, because n8n Cloud cannot reach http://localhost:3000 — which is
+// why uploads sat on "processing" forever. Groq answers in ~4s, and Vercel
+// allows far more than that, so n8n now responds with the finished analysis on
+// the same connection. No callback, no polling, no job state to get stuck in.
+
+export type N8nFailure =
+  | 'unreachable'
+  | 'invalid_output'
+  | 'timeout'
+  | 'rejected'
+  | 'unknown';
 
 export interface N8nResponse {
   ok: boolean;
-  result?: AnalysisResult;
+  result?: AnalysisResultSchemaType;
+  model?: string;
   error?: string;
-  code?: 'unreachable' | 'invalid_output' | 'timeout' | 'rejected' | 'unknown';
-}
-
-export interface DispatchResult {
-  accepted: boolean;
-  code?: 'unreachable' | 'invalid_output' | 'timeout' | 'rejected' | 'unknown';
-  error?: string;
+  code?: N8nFailure;
 }
 
 async function hmac(body: string): Promise<string> {
@@ -47,7 +54,7 @@ async function hmac(body: string): Promise<string> {
 
 export async function callN8nAnalysis(
   payload: AnalyzePayload,
-  opts: { timeoutMs?: number; maxRetries?: number } = {}
+  opts: { timeoutMs?: number } = {}
 ): Promise<N8nResponse> {
   if (!mode.n8nConfigured) {
     return {
@@ -59,96 +66,7 @@ export async function callN8nAnalysis(
 
   const body = JSON.stringify(payload);
   const signature = await hmac(body);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), opts.timeoutMs ?? 90_000);
-
-  let lastError: string | undefined;
-  const attempts = Math.max(1, opts.maxRetries ?? 1);
-
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      const res = await fetch(env.n8nWebhookUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Signature': signature,
-        },
-        body,
-        signal: controller.signal,
-      });
-
-      if (res.status === 401 || res.status === 403) {
-        return { ok: false, code: 'rejected', error: 'Webhook signature rejected.' };
-      }
-      if (!res.ok) {
-        lastError = `n8n responded ${res.status}`;
-        // backoff before retry
-        if (attempt < attempts) await sleep(2 ** attempt * 250);
-        continue;
-      }
-
-      const json = await res.json().catch(() => null);
-      if (!json) {
-        return { ok: false, code: 'invalid_output', error: 'Empty response from n8n.' };
-      }
-      // n8n Cloud wraps non-2xx Respond-node responses as HTTP 200 with the
-      // error envelope in the body — detect that here, not by status code.
-      if (
-        typeof json === 'object' &&
-        json !== null &&
-        typeof (json as { error?: unknown }).error === 'string' &&
-        !(json as { summary?: unknown }).summary
-      ) {
-        const err = (json as { error: string }).error;
-        return {
-          ok: false,
-          code: err.toLowerCase().includes('signature') ? 'rejected' : 'invalid_output',
-          error: err,
-        };
-      }
-      const result = normalizeAnalysisResult(json);
-      if (!result) {
-        return { ok: false, code: 'invalid_output', error: 'Invalid analysis output from n8n.' };
-      }
-      return { ok: true, result };
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        return { ok: false, code: 'timeout', error: 'n8n request timed out.' };
-      }
-      lastError = err instanceof Error ? err.message : 'unknown fetch error';
-      if (attempt < attempts) await sleep(2 ** attempt * 250);
-    }
-  }
-  clearTimeout(timeout);
-  return {
-    ok: false,
-    code: 'unreachable',
-    error: lastError ?? 'n8n unreachable.',
-  };
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-// ── Async dispatch ──
-// Fires the analysis job at n8n and returns as soon as n8n *accepts* it (after
-// HMAC verification). The heavy Groq call then runs in the background and n8n
-// calls /api/analyze/callback when done — so this stays well under serverless
-// function limits (works on Vercel Hobby's 10s cap). We never await the LLM
-// result here.
-export async function dispatchN8nAnalysis(
-  payload: AnalyzePayload,
-  opts: { timeoutMs?: number } = {}
-): Promise<DispatchResult> {
-  if (!mode.n8nConfigured) {
-    return { accepted: false, code: 'unreachable', error: 'n8n is not configured.' };
-  }
-
-  const body = JSON.stringify(payload);
-  const signature = await hmac(body);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), opts.timeoutMs ?? 15_000);
+  const timeoutMs = opts.timeoutMs ?? env.n8nTimeoutMs;
 
   try {
     const res = await fetch(env.n8nWebhookUrl, {
@@ -158,205 +76,84 @@ export async function dispatchN8nAnalysis(
         'X-Signature': signature,
       },
       body,
-      signal: controller.signal,
+      // AbortSignal.timeout cleans itself up. The hand-rolled
+      // AbortController+setTimeout this replaced leaked a timer on every
+      // early return.
+      signal: AbortSignal.timeout(timeoutMs),
     });
-    clearTimeout(timeout);
 
     if (res.status === 401 || res.status === 403) {
-      return { accepted: false, code: 'rejected', error: 'Webhook signature rejected.' };
+      return { ok: false, code: 'rejected', error: 'Webhook signature rejected.' };
     }
-    if (!res.ok) {
-      return {
-        accepted: false,
-        code: 'unreachable',
-        error: `n8n responded ${res.status}`,
-      };
-    }
-    // n8n Cloud wraps non-2xx Respond nodes as HTTP 200 with the error in the
-    // body — so a 200 can mean "rejected". The async accept body carries
-    // { accepted: true, jobId }, while a rejection carries { error: "..." }.
+
     const text = await res.text();
-    let parsed: unknown = null;
+    let json: unknown = null;
     try {
-      parsed = JSON.parse(text);
+      json = JSON.parse(text);
     } catch {
-      parsed = null;
+      json = null;
     }
-    if (
-      parsed &&
-      typeof parsed === 'object' &&
-      typeof (parsed as { error?: unknown }).error === 'string' &&
-      (parsed as { accepted?: unknown }).accepted !== true
-    ) {
-      const err = (parsed as { error: string }).error;
+
+    if (!res.ok && !json) {
+      return { ok: false, code: 'unreachable', error: `n8n responded ${res.status}` };
+    }
+    if (!json) {
+      return { ok: false, code: 'invalid_output', error: 'Empty response from n8n.' };
+    }
+
+    // n8n Cloud serves non-2xx Respond-node bodies over HTTP 200, so a
+    // rejection must be detected from the envelope, not the status code.
+    const envelope = json as {
+      ok?: unknown;
+      error?: unknown;
+      result?: unknown;
+      model?: unknown;
+    };
+    if (typeof envelope.error === 'string' && envelope.ok !== true) {
+      const err = envelope.error;
       return {
-        accepted: false,
-        code: err.toLowerCase().includes('signature') ? 'rejected' : 'unreachable',
+        ok: false,
+        code: err.toLowerCase().includes('signature') ? 'rejected' : 'invalid_output',
         error: err,
       };
     }
-    // 200/202 with { accepted: true } = job accepted; result arrives via the
-    // async callback.
-    return { accepted: true };
+
+    // Accept both the current envelope ({ ok, engine, model, result }) and a
+    // bare analysis object, so an older workflow build still works.
+    const rawResult = envelope.result ?? json;
+    const result = normalizeAnalysisResult(rawResult);
+    if (!result) {
+      return {
+        ok: false,
+        code: 'invalid_output',
+        error: 'Invalid analysis output from n8n.',
+      };
+    }
+
+    return {
+      ok: true,
+      result,
+      model: typeof envelope.model === 'string' ? envelope.model : undefined,
+    };
   } catch (err) {
-    clearTimeout(timeout);
-    if (err instanceof Error && err.name === 'AbortError') {
-      return { accepted: false, code: 'timeout', error: 'n8n did not accept the job in time.' };
+    const isTimeout =
+      err instanceof Error &&
+      (err.name === 'TimeoutError' || err.name === 'AbortError');
+    if (isTimeout) {
+      return {
+        ok: false,
+        code: 'timeout',
+        error: `n8n did not respond within ${timeoutMs}ms.`,
+      };
     }
     return {
-      accepted: false,
+      ok: false,
       code: 'unreachable',
       error: err instanceof Error ? err.message : 'unknown fetch error',
     };
   }
 }
 
-// ── v1 normalization ──
-// Gemini is prompted with a rich schema (n8n/LLM_PROMPT_AND_SCHEMA.md) but
-// does NOT reliably follow it key-for-key across runs — observed variants:
-//   flat v2:  overall_sentiment:"positive", overall_sentiment_score, confidence,
-//             customer.{satisfaction_start,satisfaction_end,churn_risk},
-//             emotions[].{emotion,intensity}
-//   nested:   overall_sentiment:{score,label,confidence}, customer.{initial_
-//             sentiment,final_sentiment,satisfaction_score,intent:{category,
-//             description}}, important_moments[].{seq,event,impact}
-// The app's canonical shape is v1 (§8.4) — DB columns and dashboard are built
-// around it — so ANY variant is mapped here, at the ONLY place n8n output
-// enters the app. Fallbacks are only used when the value is truly absent.
-export function normalizeAnalysisResult(
-  input: unknown
-): AnalysisResultSchemaType | null {
-  if (!input || typeof input !== 'object') return null;
-  const raw = input as Record<string, unknown>;
-
-  // Already v1 (or exactly matching) — validate directly.
-  const direct = analysisResultSchema.safeParse(input);
-  if (direct.success) return direct.data;
-
-  const asObj = (v: unknown): Record<string, unknown> =>
-    v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
-  // First defined non-null value across candidate keys.
-  const pick = (
-    o: Record<string, unknown>,
-    ...keys: string[]
-  ): unknown => {
-    for (const k of keys) {
-      const v = o[k];
-      if (v !== undefined && v !== null) return v;
-    }
-    return undefined;
-  };
-  const num = (v: unknown, max = 100): number | null => {
-    if (typeof v !== 'number' || !Number.isFinite(v)) return null;
-    return Math.min(max, Math.max(0, v));
-  };
-  const label = (v: unknown, fallback: string): string => {
-    const s = String(v ?? '').trim();
-    return s.length > 0 ? s : fallback;
-  };
-  const sentiment = (v: unknown): 'positive' | 'neutral' | 'negative' =>
-    v === 'positive' || v === 'neutral' || v === 'negative' ? v : 'neutral';
-
-  // overall_sentiment: string (flat v2) or object (nested variant).
-  const os = asObj(raw.overall_sentiment);
-  const osLabel = sentiment(
-    typeof raw.overall_sentiment === 'string'
-      ? raw.overall_sentiment
-      : pick(os, 'label', 'sentiment', 'value')
-  );
-  const osScore = num(
-    pick(raw, 'overall_sentiment_score', 'overall_score') ?? pick(os, 'score')
-  );
-  const conf = num(pick(raw, 'confidence') ?? pick(os, 'confidence'), 1) ?? 0.5;
-
-  // intent: top-level or nested inside customer.
-  const customer = asObj(raw.customer);
-  const intent = asObj(raw.intent ?? pick(customer, 'intent'));
-
-  const emotions = (Array.isArray(raw.emotions) ? raw.emotions : [])
-    .filter((e): e is Record<string, unknown> => !!e && typeof e === 'object')
-    .slice(0, 10)
-    .map((e) => ({
-      label: label(pick(e, 'emotion', 'label', 'name'), 'unknown').slice(0, 40),
-      intensity: num(pick(e, 'intensity', 'score')) ?? 0,
-    }));
-
-  const moments = (Array.isArray(raw.important_moments) ? raw.important_moments : [])
-    .filter((m): m is Record<string, unknown> => !!m && typeof m === 'object')
-    .slice(0, 10)
-    .map((m) => ({
-      seq: num(pick(m, 'seq')) ?? 1,
-      speaker: label(pick(m, 'speaker'), '').slice(0, 40),
-      event: label(pick(m, 'event', 'description', 'summary'), 'Key moment.').slice(0, 200),
-    }));
-
-  const sentences = (Array.isArray(raw.sentences) ? raw.sentences : Array.isArray(raw.turns) ? raw.turns : [])
-    .filter((s): s is Record<string, unknown> => !!s && typeof s === 'object')
-    .map((s) => ({
-      seq: num(pick(s, 'seq')) ?? 1,
-      speaker: label(pick(s, 'speaker'), '').slice(0, 40),
-      text: label(pick(s, 'text'), '').slice(0, 2000),
-      sentiment: sentiment(pick(s, 'sentiment', 'label')),
-      score: num(pick(s, 'score', 'sentiment_score')) ?? 50,
-      confidence: num(pick(s, 'confidence', 'sentiment_confidence'), 1) ?? 0.5,
-      emotion: label(pick(s, 'emotion'), 'neutral').slice(0, 40),
-      ...(s.evidence ? { evidence: label(s.evidence, '').slice(0, 200) } : {}),
-    }));
-
-  if (sentences.length === 0) return null;
-
-  // If the model omitted the aggregate (observed across runs), derive it
-  // honestly from the per-sentence data it did return.
-  const sentenceScores = sentences
-    .map((s) => s.score)
-    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
-  const mean = (arr: number[]): number =>
-    arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
-  const osLabelRaw = typeof raw.overall_sentiment === 'string'
-    ? raw.overall_sentiment
-    : pick(os, 'label', 'sentiment', 'value');
-  const osScoreFinal = osScore ?? (sentenceScores.length ? Math.round(mean(sentenceScores)) : 50);
-  const osConfFinal = raw.confidence !== undefined || os.confidence !== undefined
-    ? conf
-    : mean(sentences.map((s) => s.confidence));
-  const osLabelFinal =
-    osLabelRaw === undefined && sentenceScores.length > 0
-      ? osScoreFinal >= 60 ? 'positive' : osScoreFinal <= 40 ? 'negative' : 'neutral'
-      : sentiment(osLabelRaw);
-
-  const mapped = {
-    overall_sentiment: {
-      label: osLabelFinal,
-      score: osScoreFinal,
-      confidence: osConfFinal,
-    },
-    summary: label(raw.summary, 'No summary available.').slice(0, 500),
-    intent: {
-      category: label(pick(intent, 'category', 'name', 'type'), 'general').slice(0, 40),
-      description: label(pick(intent, 'description', 'summary'), 'No description available.').slice(0, 200),
-    },
-    resolution: { status: 'unknown', likelihood: null },
-    risk: { escalation: null },
-    customer: {
-      frustration: null,
-      satisfaction: num(
-        pick(customer, 'satisfaction_end', 'satisfaction_score', 'satisfaction', 'final_satisfaction')
-      ),
-      effort: null,
-    },
-    agent: {
-      empathy: num(pick(asObj(raw.agent), 'empathy', 'empathy_score')),
-      clarity: num(pick(asObj(raw.agent), 'clarity', 'clarity_score')),
-      professionalism: num(pick(asObj(raw.agent), 'professionalism', 'professionalism_score')),
-    },
-    emotions,
-    important_moments: moments,
-    sentences,
-  };
-
-  const check = analysisResultSchema.safeParse(mapped);
-  return check.success ? check.data : null;
-}
-
 // Re-export the payload schema helper for callers that build the payload.
 export { analyzePayloadSchema };
+export { normalizeAnalysisResult };

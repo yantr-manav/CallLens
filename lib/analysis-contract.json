@@ -1,0 +1,188 @@
+{
+  "$comment": "SINGLE SOURCE OF TRUTH for the LLM contract. Imported by lib/groq.ts (in-app fallback) AND by scripts/build-n8n-workflow.mjs (which bakes it into the n8n Code node). Editing it here changes both paths, so the primary and fallback engines can never drift apart. Regenerate the workflow after any edit: `node scripts/build-n8n-workflow.mjs`.",
+
+  "model": "openai/gpt-oss-120b",
+  "fallbackModel": "openai/gpt-oss-20b",
+  "temperature": 0.1,
+  "reasoningEffort": "medium",
+  "fallbackReasoningEffort": "low",
+  "endpoint": "https://api.groq.com/openai/v1/chat/completions",
+
+  "$budgetComment": "Groq's free tier admits a request only if (prompt_tokens + max_completion_tokens) <= tpmLimit. A fixed max_completion_tokens of 8192 therefore returned HTTP 413 'Request too large' on even an 11-turn transcript. Both the n8n Build Request node and lib/groq.ts size the completion budget from these numbers instead. Raise tpmLimit if the Groq plan is upgraded (check x-ratelimit-limit-tokens on any response).",
+  "tpmLimit": 8000,
+  "tpmSafetyMargin": 500,
+  "$systemPromptTokensComment": "Measured: the composed prompt (rules + stringified jsonSchema) is ~5.4k chars ≈ 1510 tokens. Re-measure and update this if either is edited substantially.",
+  "systemPromptTokens": 1600,
+  "charsPerToken": 3.6,
+  "minCompletionTokens": 1200,
+  "maxCompletionTokens": 4096,
+  "maxUserChars": 16000,
+
+  "modelNotes": [
+    "llama-3.3-70b-versatile was DECOMMISSIONED by Groq and returns model_not_found. Do not resurrect it.",
+    "qwen/qwen3.6-27b FAILS response_format json_object (json_validate_failed). Do not use.",
+    "gpt-oss models emit reasoning tokens that count toward max_completion_tokens — keep headroom or the JSON truncates.",
+    "Groq's json_object mode enforces NO server-side schema. The schema below lives in the prompt; Zod in lib/validation.ts is the real gate.",
+    "Free tier: 8000 TPM / 1000 RPM, refilling continuously (~133 tokens/sec). A typical analysis actually consumes ~1500-2500 tokens, so sustained throughput is roughly one upload every 15s."
+  ],
+
+  "systemPrompt": "You are CallLens, a precise conversation-intelligence engine. You analyze call-centre transcripts and return ONLY strict JSON matching the schema below. No prose, no markdown fences.\n\nHARD RULES — these determine your quality score, never violate them:\n1. Classify sentiment from MEANING and CONTEXT, not keyword matching. \"I am not unhappy\" is NOT negative. Read the conversation, not the dictionary.\n2. Prefer an evidence-based ESTIMATE over a null. Use null (or \"unknown\") ONLY when the transcript genuinely carries no signal for that field. A billing complaint that ends with the agent issuing a refund IS resolved — say so.\n3. agent.* fields are null only if NO speaker can be identified as the agent/rep/support/advisor.\n4. customer.* fields are null only if NO speaker can be identified as the customer/caller. For fully unlabeled transcripts, infer roles from behaviour (who reports a problem vs who offers a fix) rather than refusing.\n5. Never expose chain-of-thought. Every explanation must be a short, evidence-backed sentence grounded in the transcript.\n6. Enums: use ONLY the allowed values. Every sentence gets positive|neutral|negative.\n7. sentences[]: emit EXACTLY ONE object per input turn, and `seq` MUST match that turn's seq exactly. Never merge turns, never skip one, never invent one.\n8. Every sentence object MUST include `evidence`: a verbatim fragment of at most 15 words, copied from that turn, that justifies the label.\n9. Sentiment `score` is 0-100 (50 = neutral). `confidence` is 0-1.\n10. important_moments: up to 6 moments that changed the conversation's direction. Never cite a seq that does not exist.\n11. emotions: up to 5 aggregate emotion labels with 0-100 intensity.\n12. reasoning.drivers: 2-5 factors that most determined the overall sentiment, each with a direction, a 0-100 weight, and a verbatim quote. reasoning.counter_signals: evidence that pointed the OTHER way and that you weighed but did not follow. This is how you show your work — it is graded.\n\nReturn the JSON object ONLY.",
+
+  "jsonSchema": {
+    "type": "object",
+    "required": [
+      "overall_sentiment",
+      "summary",
+      "intent",
+      "resolution",
+      "risk",
+      "customer",
+      "agent",
+      "emotions",
+      "important_moments",
+      "reasoning",
+      "sentences"
+    ],
+    "properties": {
+      "overall_sentiment": {
+        "type": "object",
+        "required": ["label", "score", "confidence"],
+        "properties": {
+          "label": { "type": "string", "enum": ["positive", "neutral", "negative"] },
+          "score": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      },
+      "summary": { "type": "string", "maxLength": 500 },
+      "intent": {
+        "type": "object",
+        "required": ["category", "description"],
+        "properties": {
+          "category": { "type": "string", "maxLength": 40 },
+          "description": { "type": "string", "maxLength": 200 }
+        }
+      },
+      "resolution": {
+        "type": "object",
+        "required": ["status", "likelihood"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["resolved", "unresolved", "partial", "unknown"]
+          },
+          "likelihood": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 }
+        }
+      },
+      "risk": {
+        "type": "object",
+        "required": ["escalation"],
+        "properties": {
+          "escalation": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 }
+        }
+      },
+      "customer": {
+        "type": "object",
+        "required": ["frustration", "satisfaction", "effort"],
+        "properties": {
+          "frustration": { "type": ["string", "null"], "enum": ["low", "medium", "high", null] },
+          "satisfaction": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+          "effort": { "type": ["string", "null"], "enum": ["low", "medium", "high", null] }
+        }
+      },
+      "agent": {
+        "type": "object",
+        "required": ["empathy", "clarity", "professionalism"],
+        "properties": {
+          "empathy": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+          "clarity": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+          "professionalism": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 }
+        }
+      },
+      "emotions": {
+        "type": "array",
+        "maxItems": 5,
+        "items": {
+          "type": "object",
+          "required": ["label", "intensity"],
+          "properties": {
+            "label": { "type": "string", "maxLength": 40 },
+            "intensity": { "type": "integer", "minimum": 0, "maximum": 100 }
+          }
+        }
+      },
+      "important_moments": {
+        "type": "array",
+        "maxItems": 6,
+        "items": {
+          "type": "object",
+          "required": ["seq", "speaker", "event"],
+          "properties": {
+            "seq": { "type": "integer", "minimum": 1 },
+            "speaker": { "type": "string", "maxLength": 40 },
+            "event": { "type": "string", "maxLength": 200 }
+          }
+        }
+      },
+      "reasoning": {
+        "type": "object",
+        "required": ["drivers", "counter_signals"],
+        "properties": {
+          "drivers": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 5,
+            "items": {
+              "type": "object",
+              "required": ["factor", "direction", "weight", "evidence"],
+              "properties": {
+                "factor": { "type": "string", "maxLength": 80 },
+                "direction": { "type": "string", "enum": ["positive", "negative"] },
+                "weight": { "type": "integer", "minimum": 0, "maximum": 100 },
+                "evidence": { "type": "string", "maxLength": 200 }
+              }
+            }
+          },
+          "counter_signals": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "type": "object",
+              "required": ["observation", "evidence"],
+              "properties": {
+                "observation": { "type": "string", "maxLength": 160 },
+                "evidence": { "type": "string", "maxLength": 200 }
+              }
+            }
+          }
+        }
+      },
+      "sentences": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "required": [
+            "seq",
+            "speaker",
+            "text",
+            "sentiment",
+            "score",
+            "confidence",
+            "emotion",
+            "evidence"
+          ],
+          "properties": {
+            "seq": { "type": "integer", "minimum": 1 },
+            "speaker": { "type": "string", "maxLength": 40 },
+            "text": { "type": "string", "minLength": 1, "maxLength": 2000 },
+            "sentiment": { "type": "string", "enum": ["positive", "neutral", "negative"] },
+            "score": { "type": "integer", "minimum": 0, "maximum": 100 },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+            "emotion": { "type": "string", "maxLength": 40 },
+            "evidence": { "type": "string", "maxLength": 200 }
+          }
+        }
+      }
+    }
+  }
+}

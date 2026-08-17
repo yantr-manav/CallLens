@@ -7,24 +7,28 @@ import { normalizeTranscript } from '@/lib/normalize';
 import { sha256File } from '@/lib/hash';
 import {
   analyzePayloadSchema,
-  analysisResultSchema,
   validateUploadedFile,
   validateTextContent,
+  MAX_ANALYZED_TURNS,
+  type FileValidationError,
 } from '@/lib/validation';
-import { dispatchN8nAnalysis } from '@/lib/n8n';
-import { mockAnalyze } from '@/lib/mock-analyzer';
-import { mode } from '@/lib/config';
+import { runAnalysis } from '@/lib/analysis-engine';
 import { checkRateLimit } from '@/lib/rate-limit';
-import { type FileValidationError } from '@/lib/validation';
 import { Errors, fileErrorMessage, json } from '@/lib/errors';
 
 export const maxDuration = 60;
 
-// ── POST /api/analyze — async pipeline (build plan §8.1) ──
-// The browser's ONLY entry point. Validates + persists, dispatches the job to
-// n8n, and returns 202 immediately. n8n runs Groq in the background and calls
-// /api/analyze/callback when done (see §8.5). This keeps the request under
-// serverless function limits — works on Vercel Hobby's 10s cap.
+// ── POST /api/analyze — the browser's ONLY entry point ──
+//
+// Synchronous end to end: validate → persist → analyze → return the finished
+// report id, typically in 5-7s. The analysis itself goes through the ladder in
+// lib/analysis-engine.ts (n8n → direct Groq → heuristic), which is why this
+// route no longer has an n8n-vs-mock branch and no longer returns 202.
+//
+// The previous async design returned 202 and waited for n8n to POST results
+// back to /api/analyze/callback. n8n Cloud cannot reach http://localhost:3000,
+// so that callback never arrived in local development and uploads sat on
+// "processing" forever.
 
 export async function POST(req: NextRequest) {
   try {
@@ -66,41 +70,52 @@ async function handleAnalyze(req: NextRequest) {
   const fileHash = await sha256File(file);
   const store = getStore();
 
-  // ── Idempotency: same content hash → cached result (never re-bill the LLM)
+  // ── Idempotency: same content hash → serve the cached report, never re-bill
+  // the LLM. A row only counts as cached if the analysis actually EXISTS: rows
+  // could be marked 'done' with no analysis attached, and every stale
+  // 'processing' row left over from the old async design would otherwise be
+  // un-analysable forever. Anything else re-runs in place.
   const existing = await store.findConversationByHash(user.id, fileHash);
-  if (existing) {
-    if (existing.status === 'done') {
+  if (existing && existing.status === 'done') {
+    const detail = await store.getAnalysisDetail(existing.id);
+    if (detail) {
       return json(
-        { conversationId: existing.id, status: 'done', cached: true },
+        {
+          conversationId: existing.id,
+          status: 'done',
+          cached: true,
+          engine: detail.analysis.engine ?? null,
+          model: detail.analysis.model ?? null,
+          degraded: Boolean(detail.analysis.degraded),
+        },
         200
       );
     }
-    if (existing.status === 'processing') {
-      return json(
-        { conversationId: existing.id, status: 'processing', cached: false },
-        202
-      );
-    }
-    // 'failed' or 'pending' → fall through and re-run on the same row.
   }
 
-  // §8.6 — rate limit per user (6 analyses / 10 min). Cached hits are
-  // exempt: they never touch the LLM.
+  // Rate limit per user (6 analyses / 10 min). Cached hits above are exempt —
+  // they never touch the LLM.
   const rate = await checkRateLimit(user.id, 6);
   if (!rate.ok) {
-    return json(
-      { error: Errors.rateLimited, retryAfterSec: rate.retryAfterSec },
-      429
-    );
+    return json({ error: Errors.rateLimited, retryAfterSec: rate.retryAfterSec }, 429);
   }
 
-  // ── Normalize to canonical turns BEFORE anything reaches n8n (§8.2)
+  // ── Normalize to canonical turns BEFORE anything reaches n8n ──
   const normalized = normalizeTranscript(text);
   if (normalized.turns.length === 0) {
     return json({ error: Errors.noTurns }, 422);
   }
 
-  // ── Persist raw transcript + conversation row
+  // Guard the context window and the latency budget. The payload schema
+  // tolerates far more turns than a single LLM call can sensibly handle, so cap
+  // it here and tell the user plainly how many were dropped rather than
+  // silently analysing a fraction of their call.
+  const totalTurns = normalized.turns.length;
+  const analyzedTurns = normalized.turns.slice(0, MAX_ANALYZED_TURNS);
+  const truncatedTurns = totalTurns - analyzedTurns.length;
+  const forAnalysis = { ...normalized, turns: analyzedTurns };
+
+  // ── Persist raw transcript + conversation row ──
   const storagePath = await saveRawTranscript(user.id, fileHash, text);
   let conversation = existing;
   if (!conversation) {
@@ -114,12 +129,11 @@ async function handleAnalyze(req: NextRequest) {
     await store.updateConversationStatus(conversation.id, 'processing');
   }
 
-  // ── Build + validate the n8n payload (contract over the webhook boundary)
+  // ── Build + validate the n8n payload (the signed webhook contract) ──
   const payload = analyzePayloadSchema.parse({
     conversation_id: conversation.id,
     file_name: file.name,
-    app_url: req.nextUrl.origin,
-    transcript: normalized.turns.map((t) => ({
+    transcript: analyzedTurns.map((t) => ({
       seq: t.seq,
       speaker: t.speaker,
       text: t.text,
@@ -127,43 +141,23 @@ async function handleAnalyze(req: NextRequest) {
     })),
   });
 
-  // ── Analyze: async n8n when configured, deterministic mock otherwise ──
-  if (mode.n8nConfigured) {
-    // Fire-and-forget: n8n verifies the signature, accepts the job (202), then
-    // runs Groq and calls /api/analyze/callback with the result. We return
-    // immediately so the request stays inside the serverless time limit.
-    const dispatched = await dispatchN8nAnalysis(payload, { timeoutMs: 15_000 });
-    if (!dispatched.accepted) {
-      // eslint-disable-next-line no-console
-      console.error('[/api/analyze] n8n rejected job:', dispatched.code, dispatched.error);
-      await store.updateConversationStatus(conversation.id, 'failed');
-      if (dispatched.code === 'rejected') {
-        return json({ error: Errors.serviceUnavailable }, 502);
-      }
-      return json({ error: Errors.serviceUnavailable }, 502);
-    }
-    return json(
-      {
-        conversationId: conversation.id,
-        status: 'processing',
-        cached: false,
-        detectedFormat: normalized.format,
-      },
-      202
-    );
+  // ── Analyze (n8n → Groq → heuristic) ──
+  const outcome = await runAnalysis(payload, forAnalysis);
+  if (!outcome.ok || !outcome.result) {
+    // eslint-disable-next-line no-console
+    console.error('[/api/analyze] every engine failed:', outcome.error);
+    await store.updateConversationStatus(conversation.id, 'failed');
+    return json({ error: Errors.serviceUnavailable }, 502);
   }
 
-  // Demo mode: run the mock synchronously and persist at once.
-  const result = mockAnalyze(normalized);
-  const validated = analysisResultSchema.safeParse(result);
-  if (!validated.success) {
-    await store.updateConversationStatus(conversation.id, 'failed');
-    return json({ error: Errors.invalidOutput }, 502);
-  }
   try {
-    await store.createAnalysis({
+    await store.replaceAnalysis({
       conversationId: conversation.id,
-      result: validated.data,
+      result: outcome.result,
+      engine: outcome.engine,
+      model: outcome.model,
+      latencyMs: outcome.latencyMs,
+      degraded: outcome.degraded,
     });
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -178,6 +172,13 @@ async function handleAnalyze(req: NextRequest) {
       status: 'done',
       cached: false,
       detectedFormat: normalized.format,
+      formatConfidence: normalized.formatConfidence,
+      turnCount: analyzedTurns.length,
+      truncatedTurns,
+      engine: outcome.engine,
+      model: outcome.model ?? null,
+      latencyMs: outcome.latencyMs,
+      degraded: outcome.degraded,
     },
     200
   );
