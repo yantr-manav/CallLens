@@ -44,24 +44,31 @@ return [{ json: { ...inp, N8N_WEBHOOK_SECRET: '${secret}', GROQ_API_KEY: '${key}
 `;
 
 const verifyCode = `
-const crypto = require('crypto');
 // HMAC-SHA256 verification. The secret arrives from the "Config" node chained
 // upstream. JSON.stringify preserves the key order of the received body, so it
 // reproduces the exact string Next.js signed in lib/n8n.ts.
 const inp = $input.first().json || {};
-const secret = String(inp.N8N_WEBHOOK_SECRET || inp.webhookSecret || '');
-const headers = inp.headers || {};
-const sig = String(headers['x-signature'] || headers['X-Signature'] || '');
-const body = inp.body;
-// n8n 2.x may deliver the body already parsed (object) or as the raw string.
-const bodyStr = typeof body === 'string' ? body : JSON.stringify(body || {});
-const computed = crypto.createHmac('sha256', secret).update(bodyStr).digest('hex');
-const valid = sig.length > 0 && secret.length > 0 && sig === computed;
+let valid = false;
+try {
+  const crypto = require('crypto');
+  const secret = String(inp.N8N_WEBHOOK_SECRET || inp.webhookSecret || '');
+  const headers = inp.headers || {};
+  const sig = String(headers['x-signature'] || headers['X-Signature'] || '');
+  const body = inp.body;
+  // n8n 2.x may deliver the body already parsed (object) or as the raw string.
+  const bodyStr = typeof body === 'string' ? body : JSON.stringify(body || {});
+  const computed = crypto.createHmac('sha256', secret).update(bodyStr).digest('hex');
+  valid = sig.length > 0 && secret.length > 0 && sig === computed;
+} catch (e) {
+  // Fail closed, but never throw — a throw aborts the run before Respond 401.
+  valid = false;
+}
 return [{ json: { ...inp, valid: valid } }];
 `;
 
 const buildCode = `
 const inp = $input.first().json || {};
+try {
 const apiKey = String(inp.GROQ_API_KEY || inp.apiKey || '');
 // The signed payload is nested under .body on the webhook item — reading it off
 // the root was why callbackUrl used to come out empty. Mirror the string/object
@@ -131,6 +138,17 @@ return [{ json: {
   truncatedChars: truncatedChars,
   GROQ_API_KEY: apiKey
 } }];
+} catch (e) {
+  // Never throw: an abort here would skip every Respond node and hand the
+  // caller an empty HTTP 200. Emit an empty requestBody instead so "Call Groq"
+  // fails cleanly and "Respond 502" reports why.
+  return [{ json: {
+    ...inp,
+    requestBody: {},
+    buildError: String(e && e.message ? e.message : e),
+    GROQ_API_KEY: String(inp.GROQ_API_KEY || '')
+  } }];
+}
 `;
 
 const groqCallCode = `
@@ -138,37 +156,63 @@ const groqCallCode = `
 // and Code nodes have neither global fetch nor $helpers. This sends the exact
 // bytes we built (needs NODE_FUNCTION_ALLOW_BUILTIN=crypto,https on a
 // self-hosted container — n8n Cloud allows all builtins by default).
-const https = require('https');
+//
+// SANDBOX RULE: use ONLY require()'d builtins and plain JS here. Node globals
+// that a browser also has (Buffer, process, setImmediate) are NOT reliably
+// exposed in the Code-node sandbox. An earlier build set
+// 'Content-Length': Buffer.byteLength(payload) and threw "Buffer is not
+// defined" on every run — which aborted the execution before any Respond node,
+// so the webhook returned an empty HTTP 200 with no error anywhere.
+// Content-Length is unnecessary: http.request sets it, or uses chunked encoding.
 const inp = $input.first().json || {};
-const payload = JSON.stringify(inp.requestBody || {});
 let status = 0;
 let text = '';
 let parsed = null;
-await new Promise(function (resolve) {
-  const req = https.request(${JSON.stringify(contract.endpoint)}, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(payload),
-      'Authorization': 'Bearer ' + String(inp.GROQ_API_KEY || '')
-    }
-  }, function (res) {
-    status = res.statusCode || 0;
-    res.setEncoding('utf8');
-    res.on('data', function (c) { text += c; });
-    res.on('end', function () {
-      try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
-      resolve();
+
+try {
+  const https = require('https');
+  const payload = JSON.stringify(inp.requestBody || {});
+  await new Promise(function (resolve) {
+    let settled = false;
+    const done = function () { if (!settled) { settled = true; resolve(); } };
+    const req = https.request(${JSON.stringify(contract.endpoint)}, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + String(inp.GROQ_API_KEY || '')
+      }
+    }, function (res) {
+      status = res.statusCode || 0;
+      res.setEncoding('utf8');
+      res.on('data', function (c) { text += c; });
+      res.on('end', function () {
+        try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
+        done();
+      });
     });
+    // Never outlive the app's own budget — a hung socket here would hold the
+    // caller's connection open until it timed out on its side.
+    req.setTimeout(25000, function () {
+      text = 'groq socket timeout after 25s';
+      try { req.destroy(); } catch (e) {}
+      done();
+    });
+    req.on('error', function (e) {
+      text = 'request error: ' + String(e && e.message ? e.message : e);
+      done();
+    });
+    req.write(payload);
+    req.end();
   });
-  // Never outlive the app's own budget — a hung socket here would hold the
-  // caller's connection open until it timed out on its side.
-  req.setTimeout(25000, function () { req.destroy(new Error('groq socket timeout')); });
-  req.on('error', function (e) { text = String(e && e.message ? e.message : e); resolve(); });
-  req.write(payload);
-  req.end();
-});
-return [{ json: { ...inp, httpStatus: status, groqResponse: parsed, groqRaw: text.slice(0, 2000) } }];
+} catch (e) {
+  // Swallow rather than throw: a throw here aborts the workflow before any
+  // Respond node runs, and the caller gets an empty 200 with no diagnosis.
+  status = 0;
+  text = 'call groq threw: ' + String(e && e.message ? e.message : e);
+  parsed = null;
+}
+
+return [{ json: { ...inp, httpStatus: status, groqResponse: parsed, groqRaw: String(text).slice(0, 2000) } }];
 `;
 
 const validateCode = `
@@ -178,10 +222,14 @@ const validateCode = `
 // the whole chain forward. It was previously declared as 'item', which threw
 // ReferenceError and killed every execution before it could respond.
 const inp = $input.first().json || {};
+let result = null;
+let ok = false;
+let text = '';
+try {
 const data = inp.groqResponse || {};
 const choices = data.choices || [];
 const msg = (choices[0] && choices[0].message) || {};
-let text = typeof msg.content === 'string' ? msg.content : '';
+text = typeof msg.content === 'string' ? msg.content : '';
 
 let cleaned = text.trim();
 // Groq may (rarely) wrap JSON in markdown fences — strip them before parsing.
@@ -189,8 +237,6 @@ if (cleaned.indexOf('\\u0060\\u0060\\u0060') === 0) {
   cleaned = cleaned.replace(/^\\u0060\\u0060\\u0060(?:json)?\\s*/i, '').replace(/\\s*\\u0060\\u0060\\u0060$/, '');
 }
 
-let result = null;
-let ok = false;
 try {
   result = JSON.parse(cleaned);
   ok = true;
@@ -204,12 +250,20 @@ try {
   }
 }
 if (ok && (!result || typeof result !== 'object')) ok = false;
+} catch (outer) {
+  // Same rule as every other node: never throw, or the caller gets an empty 200.
+  ok = false;
+  result = null;
+  text = 'validate threw: ' + String(outer && outer.message ? outer.message : outer);
+}
 
 return [{ json: {
   ...inp,
   ok: ok,
   result: result,
-  failureReason: ok ? '' : ('groq status ' + String(inp.httpStatus) + ': ' + String(inp.groqRaw || '').slice(0, 400))
+  failureReason: ok
+    ? ''
+    : ('groq status ' + String(inp.httpStatus) + ' | ' + String(inp.buildError || '') + ' | ' + String(inp.groqRaw || text || '').slice(0, 400))
 } }];
 `;
 
@@ -238,6 +292,11 @@ const buildNodes = (secret, key) => [
     name: 'Config',
     type: 'n8n-nodes-base.code',
     typeVersion: 2,
+    // Belt-and-braces on top of the try/catch inside every Code node: if one
+    // still manages to throw, keep the item flowing so a Respond node runs.
+    // Without this, an aborted execution returns an empty HTTP 200 with no
+    // error surfaced anywhere except the n8n Executions log.
+    onError: 'continueRegularOutput',
     position: [220, 0],
   },
   {
@@ -246,6 +305,11 @@ const buildNodes = (secret, key) => [
     name: 'Verify Signature',
     type: 'n8n-nodes-base.code',
     typeVersion: 2,
+    // Belt-and-braces on top of the try/catch inside every Code node: if one
+    // still manages to throw, keep the item flowing so a Respond node runs.
+    // Without this, an aborted execution returns an empty HTTP 200 with no
+    // error surfaced anywhere except the n8n Executions log.
+    onError: 'continueRegularOutput',
     position: [440, 0],
   },
   {
@@ -275,6 +339,11 @@ const buildNodes = (secret, key) => [
     name: 'Build Request',
     type: 'n8n-nodes-base.code',
     typeVersion: 2,
+    // Belt-and-braces on top of the try/catch inside every Code node: if one
+    // still manages to throw, keep the item flowing so a Respond node runs.
+    // Without this, an aborted execution returns an empty HTTP 200 with no
+    // error surfaced anywhere except the n8n Executions log.
+    onError: 'continueRegularOutput',
     position: [880, -120],
   },
   {
@@ -283,6 +352,11 @@ const buildNodes = (secret, key) => [
     name: 'Call Groq',
     type: 'n8n-nodes-base.code',
     typeVersion: 2,
+    // Belt-and-braces on top of the try/catch inside every Code node: if one
+    // still manages to throw, keep the item flowing so a Respond node runs.
+    // Without this, an aborted execution returns an empty HTTP 200 with no
+    // error surfaced anywhere except the n8n Executions log.
+    onError: 'continueRegularOutput',
     position: [1100, -120],
   },
   {
@@ -291,6 +365,11 @@ const buildNodes = (secret, key) => [
     name: 'Validate Output',
     type: 'n8n-nodes-base.code',
     typeVersion: 2,
+    // Belt-and-braces on top of the try/catch inside every Code node: if one
+    // still manages to throw, keep the item flowing so a Respond node runs.
+    // Without this, an aborted execution returns an empty HTTP 200 with no
+    // error surfaced anywhere except the n8n Executions log.
+    onError: 'continueRegularOutput',
     position: [1320, -120],
   },
   {
@@ -427,6 +506,31 @@ const publicJson = JSON.stringify(
 if (/gsk_[A-Za-z0-9]/.test(publicJson)) {
   throw new Error('refusing to write: a real Groq key leaked into the public workflow');
 }
+
+// ── Sandbox-safety guard ─────────────────────────────────────────────────────
+// n8n Code nodes run in a sandbox that exposes require()'d builtins but NOT
+// Node globals such as Buffer/process/setImmediate. Referencing one throws at
+// runtime, which aborts the execution BEFORE any Respond node — the webhook
+// then answers with an empty HTTP 200 and no error anywhere but the Executions
+// log. That cost a full debugging cycle once (`Buffer.byteLength`), so it is now
+// a build failure rather than a silent production break.
+const FORBIDDEN_GLOBALS = ['Buffer', 'process', 'setImmediate', '__dirname', 'globalThis'];
+for (const node of buildNodes(SECRET_PLACEHOLDER, KEY_PLACEHOLDER)) {
+  const code = node.parameters?.jsCode;
+  if (!code) continue;
+  for (const g of FORBIDDEN_GLOBALS) {
+    // Ignore mentions inside comments — only flag real usage.
+    const stripped = code
+      .replace(/\/\/[^\n]*/g, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '');
+    if (new RegExp(`\\b${g}\\b`).test(stripped)) {
+      throw new Error(
+        `node "${node.name}" uses the global \`${g}\`, which is not available in the n8n Code sandbox`
+      );
+    }
+  }
+}
+console.log('sandbox check: no forbidden globals in any Code node');
 writeFileSync(publicPath, publicJson);
 console.log('wrote n8n/CALLLENS_ANALYZE_CONVERSATION.json (placeholders)');
 

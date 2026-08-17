@@ -392,10 +392,25 @@ The `Config` node in n8n doesn't hold the same `N8N_WEBHOOK_SECRET` as `.env`.
 Rebuild and re-import the `.local.json` (deleting the old workflow first).
 
 **A correctly-signed request returns HTTP 200 with an empty body.**
-The signature passed but the workflow died before reaching a Respond node —
-almost always a stale workflow still installed. Open n8n → **Executions**, click
-the failed run, and look for the red node. Re-importing the freshly generated
-`.local.json` resolves it.
+The signature passed, but a Code node threw and aborted the execution before any
+Respond node could run — n8n then closes the connection with nothing.
+
+The usual cause is a **Node global that the Code sandbox doesn't expose**. The
+sandbox provides `require()`'d builtins but *not* `Buffer`, `process`,
+`setImmediate` or `__dirname`. One `Buffer.byteLength()` call in `Call Groq` was
+enough to break every run while leaving no trace outside the Executions log.
+
+This is now defended three ways, so it should not recur:
+
+1. every Code node wraps its body in `try/catch` and returns a diagnostic
+   instead of throwing;
+2. every Code node sets `onError: continueRegularOutput`, so even an unexpected
+   throw keeps the item flowing to a Respond node;
+3. `scripts/build-n8n-workflow.mjs` **fails the build** if any Code node
+   references a forbidden global.
+
+If you still see it, open n8n → **Executions**, click the failed run, and look
+for the red node. Re-import the freshly generated `.local.json`.
 
 ---
 
