@@ -11,8 +11,11 @@ export const dynamic = 'force-dynamic';
 export default async function ReportsPage() {
   const user = await requireUser();
   const store = getStore();
-  const initial = await store.listReports(user.id, 10, 0);
-  const total = await store.countReports(user.id);
+  // One round-trip: the store returns the page and the total together.
+  const { items: initial, total } = await store.listReports(user.id, {
+    limit: 10,
+    offset: 0,
+  });
 
   return (
     <AppShell user={user}>
