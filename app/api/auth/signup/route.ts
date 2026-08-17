@@ -26,7 +26,9 @@ export async function POST(req: NextRequest) {
     );
   }
   const { name, email, password } = parsed.data;
-  const result = await signUpUser(name, email, password);
+  // req.nextUrl.origin is the origin the browser actually used, so this works
+  // unchanged on localhost, preview deploys and production.
+  const result = await signUpUser(name, email, password, req.nextUrl.origin);
   if (!result.ok) {
     return NextResponse.json({ error: result.error }, { status: 400 });
   }

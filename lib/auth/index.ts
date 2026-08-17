@@ -98,7 +98,14 @@ export async function signInUser(
 export async function signUpUser(
   name: string,
   email: string,
-  password: string
+  password: string,
+  /**
+   * Public origin of the running app, e.g. http://localhost:3000. Used to build
+   * the confirmation-link destination. Without it Supabase falls back to the
+   * project's Site URL, which is the bare origin — the one-time code then lands
+   * on `/` where nothing redeems it.
+   */
+  origin?: string
 ): Promise<{ ok: boolean; error?: string; needsConfirmation?: boolean }> {
   if (mode.supabaseConfigured) {
     const client = await getServerClient();
@@ -106,7 +113,10 @@ export async function signUpUser(
     const { data, error } = await client.auth.signUp({
       email: email.trim().toLowerCase(),
       password,
-      options: { data: { full_name: name.trim() } },
+      options: {
+        data: { full_name: name.trim() },
+        ...(origin ? { emailRedirectTo: `${origin}/auth/callback` } : {}),
+      },
     });
     if (error) {
       // Map common Supabase errors to friendly, actionable messages.

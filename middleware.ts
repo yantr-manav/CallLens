@@ -41,7 +41,24 @@ async function isAuthenticated(req: NextRequest): Promise<boolean> {
 }
 
 export async function middleware(req: NextRequest) {
-  const { pathname } = req.nextUrl;
+  const { pathname, searchParams } = req.nextUrl;
+
+  // ── Supabase confirmation-link safety net ──
+  // Supabase redirects email confirmations to the project's *Site URL*, which
+  // by default is the bare origin — so the one-time PKCE code arrives as
+  // `/?code=<uuid>` and nothing exchanges it. The user ends up staring at the
+  // landing page, still signed out, with `?code=` in the address bar.
+  // Forward any stray code to the route that actually redeems it, so this works
+  // even if the Supabase "Redirect URLs" allow-list hasn't been updated.
+  if (pathname === '/' && searchParams.has('code')) {
+    const url = req.nextUrl.clone();
+    url.pathname = '/auth/callback';
+    return NextResponse.redirect(url);
+  }
+
+  // The callback route must reach its handler to set the session cookies.
+  if (pathname.startsWith('/auth/')) return NextResponse.next();
+
   const isProtected = PROTECTED.some((p) =>
     pathname === p || pathname.startsWith(p + '/')
   );

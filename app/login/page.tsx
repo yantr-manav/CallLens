@@ -8,10 +8,16 @@ import { Activity } from 'lucide-react';
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: { next?: string };
+  searchParams: { next?: string; error?: string };
 }) {
+  // Same-origin absolute paths only. `next` already starts with '/', so the old
+  // `/${next}` produced '//dashboard' — which browsers read as a
+  // protocol-relative URL (i.e. an open redirect).
+  const next = searchParams.next;
+  const dest = next && next.startsWith('/') && !next.startsWith('//') ? next : '/dashboard';
+
   const user = await getCurrentUser();
-  if (user) redirect(searchParams.next ? `/${searchParams.next}` : '/dashboard');
+  if (user) redirect(dest);
 
   const lines = modeSummary();
 
@@ -27,6 +33,16 @@ export default async function LoginPage({
             Conversation Intelligence
           </p>
         </div>
+
+        {/* Surfaced by /auth/callback when a confirmation link fails. */}
+        {searchParams.error && (
+          <p
+            role="alert"
+            className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          >
+            {searchParams.error}
+          </p>
+        )}
 
         <LoginForm next={searchParams.next} />
 
