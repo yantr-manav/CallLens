@@ -8,6 +8,21 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent } from '@/components/ui/card';
 import { Loader2, LogIn } from 'lucide-react';
 
+/**
+ * Resolves the post-login destination.
+ *
+ * The middleware sets `next` to a pathname that ALREADY starts with '/', so the
+ * old `` `/${next}` `` produced '//dashboard'. A leading '//' is parsed by
+ * browsers as a protocol-relative URL, which turns the redirect into an
+ * open-redirect shape: '//evil.com' would navigate off-site. Only same-origin
+ * absolute paths are accepted; anything else falls back to the dashboard.
+ */
+function safeNext(next?: string): string {
+  if (!next) return '/dashboard';
+  if (!next.startsWith('/') || next.startsWith('//')) return '/dashboard';
+  return next;
+}
+
 export function LoginForm({ next }: { next?: string }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -22,14 +37,16 @@ export function LoginForm({ next }: { next?: string }) {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, next }),
+        // `next` is a client-side navigation concern only — the API never
+        // consumed it.
+        body: JSON.stringify({ email, password }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setError(data?.error ?? 'Sign-in failed. Please try again.');
         return;
       }
-      router.push(next ? `/${next}` : '/dashboard');
+      router.push(safeNext(next));
       router.refresh();
     });
   }
