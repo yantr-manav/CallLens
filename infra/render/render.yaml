@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: n8n-calllens
+    env: docker
+    plan: free
+    rootDir: infra/render
+    healthCheckPath: /healthz
+    envVars:
+      - key: N8N_HOST
+        sync: false
+      - key: WEBHOOK_URL
+        sync: false
+      - key: N8N_PROTOCOL
+        value: https
+      - key: N8N_BASIC_AUTH_ACTIVE
+        value: "true"
+      - key: N8N_BASIC_AUTH_USER
+        sync: false
+      - key: N8N_BASIC_AUTH_PASSWORD
+        sync: false
+      - key: N8N_ENCRYPTION_KEY
+        sync: false
+      # Configure Postgres so data survives free-tier restarts
+      - key: DB_TYPE
+        value: postgresdb
+      - key: DB_POSTGRESDB_HOST
+        sync: false
+      - key: DB_POSTGRESDB_DATABASE
+        value: postgres
+      - key: DB_POSTGRESDB_USER
+        value: postgres
+      - key: DB_POSTGRESDB_PORT
+        value: 5432
+      - key: DB_POSTGRESDB_PASSWORD
+        sync: false
+      # Limit DB size to stay within Supabase free limits
+      - key: EXECUTIONS_DATA_PRUNE
+        value: "true"
+      - key: EXECUTIONS_DATA_MAX_AGE
+        value: "24"
+      - key: EXECUTIONS_DATA_PRUNE_MAX_COUNT
+        value: "5000"
