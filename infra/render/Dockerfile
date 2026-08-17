@@ -1,4 +1,4 @@
-FROM n8nio/n8n:2.32.7
+FROM n8nio/n8n:2.31.7
 
 # Render expects the web service to listen on a specific port.
 # We expose n8n's default port 5678, which Render will automatically detect.
